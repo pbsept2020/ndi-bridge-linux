@@ -1,0 +1,11 @@
+/Users/bessette_nouveau_macbook_pro/Projets/ndi-bridge-linux/build/CMakeFiles/ndi_bridge_common.dir
+/Users/bessette_nouveau_macbook_pro/Projets/ndi-bridge-linux/build/CMakeFiles/ndi-bridge.dir
+/Users/bessette_nouveau_macbook_pro/Projets/ndi-bridge-linux/build/CMakeFiles/network-test.dir
+/Users/bessette_nouveau_macbook_pro/Projets/ndi-bridge-linux/build/CMakeFiles/encoder-test.dir
+/Users/bessette_nouveau_macbook_pro/Projets/ndi-bridge-linux/build/CMakeFiles/codec-test.dir
+/Users/bessette_nouveau_macbook_pro/Projets/ndi-bridge-linux/build/CMakeFiles/edit_cache.dir
+/Users/bessette_nouveau_macbook_pro/Projets/ndi-bridge-linux/build/CMakeFiles/rebuild_cache.dir
+/Users/bessette_nouveau_macbook_pro/Projets/ndi-bridge-linux/build/CMakeFiles/list_install_components.dir
+/Users/bessette_nouveau_macbook_pro/Projets/ndi-bridge-linux/build/CMakeFiles/install.dir
+/Users/bessette_nouveau_macbook_pro/Projets/ndi-bridge-linux/build/CMakeFiles/install/local.dir
+/Users/bessette_nouveau_macbook_pro/Projets/ndi-bridge-linux/build/CMakeFiles/install/strip.dir
