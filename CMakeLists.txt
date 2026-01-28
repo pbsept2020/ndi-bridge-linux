@@ -170,6 +170,31 @@ if(BUILD_TESTS)
     )
 endif()
 
+# --- NDI Viewer (requires SDL2) ---
+find_package(SDL2 QUIET)
+if(SDL2_FOUND OR EXISTS "/usr/include/SDL2/SDL.h")
+    message(STATUS "SDL2 found - building ndi-viewer")
+    add_executable(ndi-viewer
+        src/tools/ndi_viewer.cpp
+    )
+    target_include_directories(ndi-viewer PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${NDI_INCLUDE_DIRS}
+        /usr/include/SDL2
+    )
+    target_link_libraries(ndi-viewer PRIVATE
+        ${NDI_LIBRARIES}
+        SDL2
+        Threads::Threads
+    )
+    if(NDI_LIBRARY_DIRS)
+        target_link_directories(ndi-viewer PRIVATE ${NDI_LIBRARY_DIRS})
+    endif()
+else()
+    message(STATUS "SDL2 not found - skipping ndi-viewer")
+    message(STATUS "Install with: sudo apt install libsdl2-dev")
+endif()
+
 # --- Install ---
 install(TARGETS ndi-bridge RUNTIME DESTINATION bin)
 
