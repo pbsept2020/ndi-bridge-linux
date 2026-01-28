@@ -170,29 +170,36 @@ if(BUILD_TESTS)
     )
 endif()
 
-# --- NDI Viewer (requires SDL2) ---
+# --- NDI Viewer (requires SDL2 + SDL2_ttf) ---
 find_package(SDL2 QUIET)
 if(SDL2_FOUND OR EXISTS "/usr/include/SDL2/SDL.h")
-    message(STATUS "SDL2 found - building ndi-viewer")
-    add_executable(ndi-viewer
-        src/tools/ndi_viewer.cpp
-    )
-    target_include_directories(ndi-viewer PRIVATE
-        ${CMAKE_SOURCE_DIR}/src
-        ${NDI_INCLUDE_DIRS}
-        /usr/include/SDL2
-    )
-    target_link_libraries(ndi-viewer PRIVATE
-        ${NDI_LIBRARIES}
-        SDL2
-        Threads::Threads
-    )
-    if(NDI_LIBRARY_DIRS)
-        target_link_directories(ndi-viewer PRIVATE ${NDI_LIBRARY_DIRS})
+    # Check for SDL2_ttf
+    if(EXISTS "/usr/include/SDL2/SDL_ttf.h")
+        message(STATUS "SDL2 + SDL2_ttf found - building ndi-viewer with GUI")
+        add_executable(ndi-viewer
+            src/tools/ndi_viewer.cpp
+        )
+        target_include_directories(ndi-viewer PRIVATE
+            ${CMAKE_SOURCE_DIR}/src
+            ${NDI_INCLUDE_DIRS}
+            /usr/include/SDL2
+        )
+        target_link_libraries(ndi-viewer PRIVATE
+            ${NDI_LIBRARIES}
+            SDL2
+            SDL2_ttf
+            Threads::Threads
+        )
+        if(NDI_LIBRARY_DIRS)
+            target_link_directories(ndi-viewer PRIVATE ${NDI_LIBRARY_DIRS})
+        endif()
+    else()
+        message(STATUS "SDL2_ttf not found - skipping ndi-viewer")
+        message(STATUS "Install with: sudo apt install libsdl2-ttf-dev")
     endif()
 else()
     message(STATUS "SDL2 not found - skipping ndi-viewer")
-    message(STATUS "Install with: sudo apt install libsdl2-dev")
+    message(STATUS "Install with: sudo apt install libsdl2-dev libsdl2-ttf-dev")
 endif()
 
 # --- Install ---
