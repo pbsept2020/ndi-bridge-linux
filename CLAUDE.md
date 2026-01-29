@@ -348,6 +348,33 @@ Tout saut/saccade de la bille = dropped frames. Carré blanc clignotant en haut 
 3. Tester le bridge bidirectionnel (host+join sur chaque machine)
 4. Optimiser la latence (buffer, GOP, pacing)
 
+## Test WAN prévu : EC2 Mac (mac2.metal)
+
+### Objectif
+Valider le bridge sur un vrai réseau WAN avec du hardware Mac natif (pas d'émulation).
+Tester le montage PiP via OBS sur l'EC2 et récupérer le flux composé.
+
+### Scénario
+```
+Mac local (host) → UDP/WAN → EC2 Mac (join) → OBS (PiP) → NDI out
+                                                              ↓
+Mac local (join) ← UDP/WAN ← EC2 Mac (host) ←────────────────┘
+```
+
+### Setup EC2
+- Instance : `mac2.metal` (~20-24$/jour, minimum 24h — contrainte Apple)
+- Region : eu-central-1 ou eu-west-1 (latence ~20-40ms depuis Paris)
+- Security group : UDP 5990-5991 inbound depuis IP locale, SSH 22
+- Installer sur l'EC2 : NDI SDK, FFmpeg, OBS, cloner le repo et build
+- **Préparer le plan de test AVANT de lancer l'instance** pour rentabiliser la journée
+
+### Ce qu'on valide
+1. Bridge fonctionne en WAN (UDP sur internet, pas juste réseau local)
+2. Framerate réel sur hardware natif Mac (vs ~7 fps sur VM émulée)
+3. Latence end-to-end sur un vrai réseau
+4. Bridge bidirectionnel (les deux machines font host+join)
+5. OBS capture le NDI bridgé et compose un PiP
+
 ## Protocole
 
 UDP, header 38 bytes Big-Endian, compatible cross-platform Mac/Linux.
