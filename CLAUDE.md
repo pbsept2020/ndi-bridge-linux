@@ -1,16 +1,69 @@
-# CLAUDE.md — NDI Bridge Linux
+# CLAUDE.md — NDI Bridge
 
 ## Projet
 
-NDI Bridge pour Mac/Linux — permet de faire transiter du NDI entre subnets distincts via un bridge H.264/UDP.
+NDI Bridge cross-platform — permet de faire transiter du NDI entre subnets distincts via un bridge H.264/UDP.
 Ce produit n'existe pas chez NewTek pour Mac (seulement Windows).
+
+### Vision produit (décidée le 29 jan 2026)
+
+**Un seul codebase C++, trois plateformes : Mac, Linux, Windows.**
+
+La version Swift (ndi-bridge-mac) est vouée à être remplacée par ce codebase C++ unifié.
+Le seul avantage de Swift était VideoToolbox (encodage hardware), mais FFmpeg peut
+utiliser VideoToolbox sur Mac via le codec `h264_videotoolbox`. Donc le C++ couvre tout.
+
+**Différenciateurs vs NDI Bridge officiel (NewTek/Vizrt) :**
+1. **Mac support** — n'existe pas chez NewTek
+2. **Cloud/headless** — CLI scriptable, déployable sur EC2 sans écran
+3. **Contrôle** — bitrate, codec, port, buffer exposés (vs boîte noire NewTek)
+
+**Décision : PAS de WSL2 pour Windows.** Le C++ compile nativement sur Windows
+(WinSock au lieu de POSIX sockets, quelques `#ifdef _WIN32`). WSL2 ajoute de la
+complexité (NAT interne, mDNS cassé, déploiement lourd) sans bénéfice.
+
+**Décision : PAS d'Electron.** Si GUI il faut, soit SwiftUI (Mac only), soit un
+serveur web intégré au binaire (`ndi-bridge --web-ui` → localhost:8080).
 
 ### Architecture
 
-- **Host** (Mac ou Linux) : capture les sources NDI locales, encode en H.264, envoie par UDP
-- **Join** (Mac ou Linux) : reçoit le flux bridgé, décode, et republie en NDI local
-- Le Join peut tourner sur : VM Parallels, serveur cloud, WSL sur Windows
-- **Les deux modes sont cross-platform** (Mac + Linux), le code est le même
+- **Host** (Mac, Linux ou Windows) : capture les sources NDI locales, encode en H.264, envoie par UDP
+- **Join** (Mac, Linux ou Windows) : reçoit le flux bridgé, décode, et republie en NDI local
+- Le Join peut tourner sur : VM Parallels, serveur cloud, EC2, PC Windows
+- **Les deux modes sont cross-platform**, le code est le même
+- Seule différence par plateforme : le choix de l'encodeur FFmpeg
+  - Mac : `h264_videotoolbox` (hardware, à implémenter)
+  - Windows : `h264_qsv` ou `h264_nvenc` (hardware, futur)
+  - Linux/fallback : `libx264` (software, actuel)
+
+### Port Windows — ce qu'il faut changer
+
+Le port Windows est minimal. Modifications nécessaires :
+```
+POSIX socket()      → WinSock WSAStartup() + socket()
+poll()              → WSAPoll()
+close(fd)           → closesocket(fd)
+#include <unistd.h> → #ifdef _WIN32 conditionnel
+```
+Tout le reste (FFmpeg, NDI SDK, Protocol, Video*, JoinMode, HostMode) compile tel quel.
+
+### Zones d'ombre non adressées
+
+1. **Traversée NAT** : en WAN sans Tailscale, le join doit avoir un port ouvert.
+   Facile sur EC2 (security group), compliqué chez un particulier (port forwarding).
+2. **Sécurité** : flux UDP en clair, pas de chiffrement ni d'authentification.
+   OK sur réseau privé ou Tailscale, problématique en WAN public.
+3. **Reconnexion** : si le réseau coupe, le join doit attendre un nouveau keyframe.
+   Pas de mécanisme de détection/reconnexion automatique.
+4. **Multi-sources** : 1 bridge = 1 source = 1 port. Pour 4 caméras il faut 4 instances.
+
+### Roadmap
+
+1. Débugger l'affichage "Linux Ball" dans Studio Monitor
+2. Ajouter `h264_videotoolbox` dans VideoEncoder.cpp (encodage hardware Mac)
+3. Test EC2 mac2.metal (valider fps réels et WAN)
+4. Port Windows (ajouter `#ifdef _WIN32` dans Network*)
+5. Deprecate ndi-bridge-mac (Swift) une fois le C++ complet
 
 ### Viewers
 
