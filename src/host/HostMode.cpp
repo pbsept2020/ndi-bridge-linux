@@ -10,6 +10,11 @@
 #include <iostream>
 #include <algorithm>
 #include <cstring>
+#include <thread>
+
+#ifdef __APPLE__
+#include <CoreFoundation/CoreFoundation.h>
+#endif
 
 namespace ndi_bridge {
 
@@ -80,11 +85,8 @@ int HostMode::start(std::atomic<bool>& running) {
 
     log.successf("Selected: %s", selectedSource_.name.c_str());
 
-    // Connect to source
-    if (!ndiReceiver_->connect(selectedSource_)) {
-        log.errorf("Failed to connect to source: %s", selectedSource_.name.c_str());
-        return 1;
-    }
+    // Prepare deferred connect (actual connection happens on receive thread)
+    ndiReceiver_->prepareConnect(selectedSource_);
 
     // Step 4: Initialize encoder (will be configured on first frame)
     log.info("Step 4/5: Preparing H.264 encoder...");
@@ -110,9 +112,10 @@ int HostMode::start(std::atomic<bool>& running) {
         return 1;
     }
 
-    // Start receiving
+    // Start receiving in background thread
     running_ = true;
     startTime_ = std::chrono::steady_clock::now();
+
     ndiReceiver_->startReceiving();
 
     log.success("═══════════════════════════════════════════════════════");
@@ -124,14 +127,22 @@ int HostMode::start(std::atomic<bool>& running) {
     log.success("═══════════════════════════════════════════════════════");
     log.info("Press Ctrl+C to stop...");
 
-    // Main loop - just wait for shutdown signal
+    // Main loop — on macOS, pump CFRunLoop so NDI's internal CoreFoundation
+    // networking callbacks fire. Without this, recv_capture never gets video.
+    auto lastStats = std::chrono::steady_clock::now();
     while (running && running_) {
+#ifdef __APPLE__
+        // Run the CFRunLoop for 100ms to process NDI's internal callbacks
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, false);
+#else
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
+#endif
 
         // Periodic stats (every 5 seconds in verbose mode)
-        static int counter = 0;
-        if (++counter >= 50 && Logger::instance().isVerbose()) {
-            counter = 0;
+        auto now = std::chrono::steady_clock::now();
+        if (Logger::instance().isVerbose() &&
+            std::chrono::duration_cast<std::chrono::seconds>(now - lastStats).count() >= 5) {
+            lastStats = now;
             auto stats = getStats();
             log.debugf("Stats: video=%lu audio=%lu encoded=%lu sent=%.2f MB time=%.1fs",
                       stats.videoFramesReceived,

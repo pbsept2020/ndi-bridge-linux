@@ -55,6 +55,13 @@ bool NetworkReceiver::startListening(uint16_t port) {
     int recvbuf = static_cast<int>(config_.recvBufferSize);
     setsockopt(socket_, SOL_SOCKET, SO_RCVBUF, &recvbuf, sizeof(recvbuf));
 
+    // Log actual buffer size granted by kernel
+    int actualBuf = 0;
+    socklen_t optLen = sizeof(actualBuf);
+    getsockopt(socket_, SOL_SOCKET, SO_RCVBUF, &actualBuf, &optLen);
+    Logger::instance().debugf("UDP recv buffer: requested=%dMB actual=%dMB",
+        recvbuf / (1024*1024), actualBuf / (1024*1024));
+
     // Bind to port
     struct sockaddr_in addr{};
     addr.sin_family = AF_INET;

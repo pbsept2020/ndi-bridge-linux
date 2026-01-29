@@ -19,8 +19,10 @@ ndi-bridge-linux/
 │   ├── common/
 │   │   ├── Protocol.h/.cpp  # UDP protocol (38-byte header)
 │   │   └── Logger.h/.cpp    # Logging system
-│   ├── host/                # TODO: Sender mode
-│   └── join/                # TODO: Receiver mode
+│   ├── host/                # Sender mode
+│   ├── join/                # Receiver mode
+│   └── tools/
+│       └── ndi_viewer.cpp   # NDI Viewer SDL2 (video + audio)
 ├── scripts/
 │   └── build.sh             # Build helper
 └── README.md
@@ -80,12 +82,32 @@ cmake --build build
 # Découvrir les sources NDI
 ./build/ndi-bridge discover
 
-# Mode host (sender) - TODO
+# Mode host (sender)
 ./build/ndi-bridge host --auto --target 192.168.1.100:5990
 
-# Mode join (receiver) - TODO
+# Mode join (receiver)
 ./build/ndi-bridge join --name "Remote Camera" --port 5990
 ```
+
+## NDI Viewer (outil de test)
+
+Viewer léger SDL2 pour visualiser les sources NDI avec audio.
+
+```bash
+# Prérequis
+sudo apt install libsdl2-dev
+
+# Build (inclus automatiquement si SDL2 détecté)
+cmake -B build && cmake --build build
+
+# Usage
+./build/ndi-viewer              # Liste interactive des sources
+./build/ndi-viewer "OBS"        # Connexion directe (match partiel)
+```
+
+**Touches** : Q ou ESC pour quitter
+
+**Testé sur** : Ubuntu 22.04 ARM64 (VM Parallels sur Mac M1)
 
 ## Protocole UDP
 
@@ -115,18 +137,20 @@ Header 38 bytes, Big-Endian, identique à la version macOS :
 
 | Phase | Status |
 |-------|--------|
-| Structure projet | DONE |
-| Protocol.h (parsing) | DONE |
-| Logger | DONE |
-| CLI skeleton | DONE |
-| NDI discover | DONE |
+| Structure projet | ✅ DONE |
+| Protocol.h (parsing) | ✅ DONE |
+| Logger | ✅ DONE |
+| CLI skeleton | ✅ DONE |
+| NDI discover | ✅ DONE |
+| NDI Viewer SDL2 (video) | ✅ DONE |
+| NDI Viewer SDL2 (audio) | ✅ DONE (28 jan 2026) |
 | Host mode (FFmpeg encode) | TODO |
 | Join mode (FFmpeg decode) | TODO |
-| Audio support | TODO |
 
 ## Compatibilité
 
-- **Linux x86_64**: Ubuntu 20.04+, Debian 11+, Fedora 35+
+- **Linux ARM64**: Ubuntu 22.04+ (VM Parallels sur Mac M1/M2/M3) ✅ Testé
+- **Linux x86_64**: Ubuntu 20.04+, Debian 11+, Fedora 35+ (EC2, WSL2)
 - **Compilateur**: GCC 9+ ou Clang 10+ (C++17)
 - **Cross-platform**: Compatible avec ndi-bridge-mac (Swift)
 

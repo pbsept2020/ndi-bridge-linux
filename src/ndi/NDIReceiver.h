@@ -118,6 +118,12 @@ public:
     bool connect(const NDISource& source);
 
     /**
+     * Prepare source for deferred connection (actual connect on receive thread)
+     * Required on macOS: NDI SDK needs connect + capture on same thread.
+     */
+    void prepareConnect(const NDISource& source);
+
+    /**
      * Disconnect from current source
      */
     void disconnect();
@@ -196,6 +202,11 @@ private:
     // For source lookup
     void* currentSources_ = nullptr;
     int numSources_ = 0;
+
+    // Deferred connect (connection happens on receive thread)
+    NDISource pendingSource_;
+    int pendingSourceIdx_ = -1;
+    bool hasPendingConnect_ = false;
 };
 
 } // namespace ndi_bridge

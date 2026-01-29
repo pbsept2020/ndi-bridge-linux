@@ -110,6 +110,12 @@ endif()
 
 target_compile_options(ndi_bridge_common PRIVATE -Wall -Wextra -Wpedantic)
 
+# --- macOS RPATH for NDI SDK ---
+if(APPLE AND NDI_LIBRARY_DIR)
+    set(CMAKE_INSTALL_RPATH "${NDI_LIBRARY_DIR}")
+    set(CMAKE_BUILD_RPATH "${NDI_LIBRARY_DIR}")
+endif()
+
 # --- Main Executable ---
 add_executable(ndi-bridge
     src/main.cpp
@@ -120,6 +126,10 @@ target_link_libraries(ndi-bridge PRIVATE
     ${NDI_LIBRARIES}
     Threads::Threads
 )
+
+if(APPLE)
+    target_link_libraries(ndi-bridge PRIVATE "-framework CoreFoundation")
+endif()
 
 target_include_directories(ndi-bridge PRIVATE
     ${CMAKE_SOURCE_DIR}/src
@@ -200,6 +210,22 @@ if(SDL2_FOUND OR EXISTS "/usr/include/SDL2/SDL.h")
 else()
     message(STATUS "SDL2 not found - skipping ndi-viewer")
     message(STATUS "Install with: sudo apt install libsdl2-dev libsdl2-ttf-dev")
+endif()
+
+# --- NDI Test Pattern Generator ---
+add_executable(ndi-test-pattern
+    src/tools/ndi_test_pattern.cpp
+)
+target_include_directories(ndi-test-pattern PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${NDI_INCLUDE_DIRS}
+)
+target_link_libraries(ndi-test-pattern PRIVATE
+    ${NDI_LIBRARIES}
+    Threads::Threads
+)
+if(NDI_LIBRARY_DIRS)
+    target_link_directories(ndi-test-pattern PRIVATE ${NDI_LIBRARY_DIRS})
 endif()
 
 # --- Install ---

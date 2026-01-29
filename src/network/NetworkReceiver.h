@@ -24,7 +24,7 @@ namespace ndi_bridge {
  */
 struct NetworkReceiverConfig {
     uint16_t port = 5990;
-    size_t recvBufferSize = 2 * 1024 * 1024;  // 2MB receive buffer
+    size_t recvBufferSize = 8 * 1024 * 1024;  // 8MB receive buffer
 };
 
 /**

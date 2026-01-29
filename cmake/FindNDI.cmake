@@ -8,23 +8,35 @@
 #   NDI_VERSION      - NDI SDK version (if available)
 
 # Search paths for NDI SDK
-set(NDI_SEARCH_PATHS
-    # Standard system paths (Linux)
-    /usr
-    /usr/local
-    # User home directory installation (Linux)
-    "$ENV{HOME}/NDI SDK for Linux"
-    "$ENV{HOME}/ndi-sdk"
-    # Environment variable
-    "$ENV{NDI_SDK_DIR}"
-    # Common installation paths (Linux)
-    /opt/ndi-sdk
-    /opt/NDI
-    # macOS paths (for cross-platform development)
-    "/Library/NDI SDK for Apple"
-)
+# On macOS, prefer the official Apple SDK (v6.3+) over /usr/local (older)
+if(APPLE)
+    set(NDI_SEARCH_PATHS
+        # macOS: Official NDI SDK for Apple (latest, v6.3+)
+        "/Library/NDI SDK for Apple"
+        # Environment variable
+        "$ENV{NDI_SDK_DIR}"
+        # Fallback system paths
+        /usr/local
+        /usr
+    )
+else()
+    set(NDI_SEARCH_PATHS
+        # Standard system paths (Linux)
+        /usr
+        /usr/local
+        # User home directory installation (Linux)
+        "$ENV{HOME}/NDI SDK for Linux"
+        "$ENV{HOME}/ndi-sdk"
+        # Environment variable
+        "$ENV{NDI_SDK_DIR}"
+        # Common installation paths (Linux)
+        /opt/ndi-sdk
+        /opt/NDI
+    )
+endif()
 
 # Find include directory
+# Use NO_DEFAULT_PATH on macOS to avoid picking up old /usr/local headers
 find_path(NDI_INCLUDE_DIR
     NAMES Processing.NDI.Lib.h
     PATHS ${NDI_SEARCH_PATHS}
@@ -32,26 +44,34 @@ find_path(NDI_INCLUDE_DIR
         include
         Include
         "include/ndi"
-        "include"  # macOS NDI SDK
+        "include"
+    ${APPLE_NO_DEFAULT}
 )
 
 # Find library - platform specific names
 if(APPLE)
     set(NDI_LIB_NAMES ndi "NDI")
+    # On macOS, search our preferred paths first without cmake defaults
+    find_library(NDI_LIBRARY
+        NAMES ${NDI_LIB_NAMES}
+        PATHS ${NDI_SEARCH_PATHS}
+        PATH_SUFFIXES
+            lib
+            "lib/macOS"
+        NO_DEFAULT_PATH
+    )
 else()
     set(NDI_LIB_NAMES ndi)
+    find_library(NDI_LIBRARY
+        NAMES ${NDI_LIB_NAMES}
+        PATHS ${NDI_SEARCH_PATHS}
+        PATH_SUFFIXES
+            lib
+            lib/x86_64-linux-gnu
+            lib64
+            "lib/x86_64-linux-gnu"
+    )
 endif()
-
-find_library(NDI_LIBRARY
-    NAMES ${NDI_LIB_NAMES}
-    PATHS ${NDI_SEARCH_PATHS}
-    PATH_SUFFIXES
-        lib
-        lib/x86_64-linux-gnu
-        lib64
-        "lib/x86_64-linux-gnu"
-        "lib/macOS"  # macOS NDI SDK
-)
 
 # Extract version from header if found
 if(NDI_INCLUDE_DIR AND EXISTS "${NDI_INCLUDE_DIR}/Processing.NDI.Lib.h")

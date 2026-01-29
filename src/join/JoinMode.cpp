@@ -45,7 +45,9 @@ int JoinMode::start(std::atomic<bool>& running) {
     log.info("Step 1/3: Initializing H.264 decoder...");
     decoder_ = std::make_unique<VideoDecoder>();
 
-    if (!decoder_->configure()) {
+    VideoDecoderConfig decoderConfig;
+    decoderConfig.outputFormat = OutputPixelFormat::BGRA;
+    if (!decoder_->configure(decoderConfig)) {
         LOG_ERROR("Failed to configure video decoder");
         return 1;
     }
@@ -124,8 +126,11 @@ int JoinMode::start(std::atomic<bool>& running) {
         if (++counter >= 50 && Logger::instance().isVerbose()) {
             counter = 0;
             auto stats = getStats();
-            log.debugf("Stats: recv=%lu decoded=%lu output=%lu audio=%lu time=%.1fs",
+            auto netStats = networkReceiver_ ? networkReceiver_->getStats() : NetworkReceiverStats{};
+            log.debugf("Stats: pkts=%lu recv=%lu dropped=%lu decoded=%lu output=%lu audio=%lu time=%.1fs",
+                      netStats.packetsReceived,
                       stats.videoFramesReceived,
+                      netStats.framesDropped,
                       stats.videoFramesDecoded,
                       stats.videoFramesOutput,
                       stats.audioFramesOutput,
@@ -268,10 +273,39 @@ void JoinMode::onDecodedFrame(const DecodedFrame& frame) {
         return;
     }
 
+    // Debug: log first frame data to verify content
+    if (videoFramesDecoded_.load() <= 3) {
+        // Check if data is all zeros
+        bool allZero = true;
+        for (size_t i = 0; i < std::min(frame.data.size(), (size_t)100); i++) {
+            if (frame.data[i] != 0) { allZero = false; break; }
+        }
+        Logger::instance().debugf("Frame %lu: %dx%d stride=%d size=%zu fmt=%d first_bytes=[%02x %02x %02x %02x %02x %02x %02x %02x] allZero=%s",
+            videoFramesDecoded_.load(), frame.width, frame.height, frame.stride,
+            frame.data.size(), (int)frame.format,
+            frame.data.size() > 0 ? frame.data[0] : 0,
+            frame.data.size() > 1 ? frame.data[1] : 0,
+            frame.data.size() > 2 ? frame.data[2] : 0,
+            frame.data.size() > 3 ? frame.data[3] : 0,
+            frame.data.size() > 4 ? frame.data[4] : 0,
+            frame.data.size() > 5 ? frame.data[5] : 0,
+            frame.data.size() > 6 ? frame.data[6] : 0,
+            frame.data.size() > 7 ? frame.data[7] : 0,
+            allZero ? "YES" : "no");
+    }
+
     // Determine NDI format from decoded frame format
-    NDIVideoFormat ndiFormat = NDIVideoFormat::BGRA;
-    if (frame.format == OutputPixelFormat::UYVY) {
-        ndiFormat = NDIVideoFormat::UYVY;
+    NDIVideoFormat ndiFormat;
+    switch (frame.format) {
+        case OutputPixelFormat::UYVY:
+            ndiFormat = NDIVideoFormat::UYVY;
+            break;
+        case OutputPixelFormat::I420:
+            ndiFormat = NDIVideoFormat::I420;
+            break;
+        default:
+            ndiFormat = NDIVideoFormat::BGRA;
+            break;
     }
 
     if (config_.bufferMs > 0) {
@@ -283,6 +317,7 @@ void JoinMode::onDecodedFrame(const DecodedFrame& frame) {
         buffered.width = frame.width;
         buffered.height = frame.height;
         buffered.stride = frame.stride;
+        buffered.ndiFormat = ndiFormat;
         buffered.timestamp = frame.timestamp;
 
         // Calculate play time
@@ -344,7 +379,7 @@ void JoinMode::processBufferedFrames() {
                 // Time to play this frame
                 if (ndiSender_ && ndiSender_->isRunning()) {
                     ndiSender_->sendVideo(frame.data.data(), frame.width, frame.height,
-                                          frame.stride, NDIVideoFormat::BGRA, frame.timestamp);
+                                          frame.stride, frame.ndiFormat, frame.timestamp);
                     videoFramesOutput_++;
                 }
                 videoBuffer_.pop();

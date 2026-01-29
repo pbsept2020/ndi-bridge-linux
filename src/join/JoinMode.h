@@ -43,6 +43,7 @@ struct BufferedVideoFrame {
     int width;
     int height;
     int stride;
+    NDIVideoFormat ndiFormat = NDIVideoFormat::I420;
     uint64_t timestamp;
     uint64_t playTime;      // When to play (system clock)
 };

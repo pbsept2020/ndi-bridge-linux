@@ -29,6 +29,10 @@
 
 using namespace ndi_bridge;
 
+#include "common/Version.h"
+static const char* BUILD_VERSION = NDI_BRIDGE_VERSION;
+static const char* BUILD_DATE = __DATE__ " " __TIME__;
+
 // Global flag for graceful shutdown
 std::atomic<bool> g_running{true};
 
@@ -245,6 +249,9 @@ int main(int argc, char* argv[]) {
         printUsage(argv[0]);
         return config.help ? 0 : 1;
     }
+
+    // Show version
+    Logger::instance().successf("NDI Bridge %s (built %s)", BUILD_VERSION, BUILD_DATE);
 
     // Initialize NDI
     if (!initNDI()) {

@@ -1,4 +1,5 @@
 #include "common/Protocol.h"
+#include "common/Logger.h"
 #include <sstream>
 #include <iomanip>
 
@@ -211,6 +212,8 @@ std::optional<FrameReassembler::Frame> FrameReassembler::addPacket(
         // If we had a pending frame, it's now dropped
         if (pending_.has_value() && pending_->receivedCount < pending_->fragmentCount) {
             stats_.framesDropped++;
+            Logger::instance().debugf("DROPPED frame seq=%u: got %u/%u fragments",
+                pending_->sequenceNumber, pending_->receivedCount, pending_->fragmentCount);
         }
 
         // Initialize new pending frame

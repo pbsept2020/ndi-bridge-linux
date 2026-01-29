@@ -1,0 +1,9 @@
+build/
+build-mac/
+.cache/
+.claude/
+*.o
+*.a
+*.dylib
+*.so
+.DS_Store

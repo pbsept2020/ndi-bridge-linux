@@ -147,7 +147,7 @@ private:
     };
 
     bool initDecoder();
-    bool initScaler(int width, int height);
+    bool initScaler(int width, int height, int srcPixelFormat);
     void cleanup();
     std::vector<NALUnit> parseNALUnits(const uint8_t* data, size_t size);
     bool processNALUnit(const NALUnit& nal, uint64_t timestamp);

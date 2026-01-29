@@ -20,6 +20,9 @@
 #include <SDL2/SDL_ttf.h>
 #include <Processing.NDI.Lib.h>
 
+#include "common/Version.h"
+static const char* VIEWER_VERSION = NDI_BRIDGE_VERSION;
+
 // Global state
 std::atomic<bool> g_running{true};
 bool g_fullscreen = false;
@@ -283,7 +286,7 @@ int showSourcePicker(SDL_Window* window, SDL_Renderer* renderer, std::vector<NDI
         SDL_GetWindowSize(window, &winW, &winH);
 
         // Title
-        renderTextCentered(renderer, g_fontLarge, "NDI Viewer", winW / 2, 30, COLOR_TEXT);
+        renderTextCentered(renderer, g_fontLarge, std::string("NDI Viewer ") + VIEWER_VERSION, winW / 2, 30, COLOR_TEXT);
         renderTextCentered(renderer, g_fontSmall, "Select a source", winW / 2, 75, COLOR_TEXT_DIM);
 
         // Source cards
@@ -347,12 +350,14 @@ void runViewer(SDL_Window* window, SDL_Renderer* renderer, const NDISourceInfo& 
 
     SDL_Texture* videoTexture = nullptr;
     int videoWidth = 0, videoHeight = 0;
+    NDIlib_FourCC_video_type_e videoFourCC = (NDIlib_FourCC_video_type_e)0;
     bool connected = false;
 
     Uint32 lastClickTime = 0;
 
-    // Set window title
-    SDL_SetWindowTitle(window, ("NDI Viewer - " + source.displayName).c_str());
+    // Set window title with version (updated later with format info)
+    std::string baseTitle = std::string("NDI Viewer ") + VIEWER_VERSION + " - " + source.displayName;
+    SDL_SetWindowTitle(window, baseTitle.c_str());
 
     while (g_running) {
         // Handle events
@@ -456,15 +461,16 @@ void runViewer(SDL_Window* window, SDL_Renderer* renderer, const NDISourceInfo& 
                     videoHeight = videoFrame.yres;
 
                     if (videoTexture) SDL_DestroyTexture(videoTexture);
-                    videoTexture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_BGRA32,
+                    videoTexture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
                         SDL_TEXTUREACCESS_STREAMING, videoWidth, videoHeight);
+                    std::cout << "Video: " << videoWidth << "x" << videoHeight
+                              << " stride=" << videoFrame.line_stride_in_bytes
+                              << " FourCC=0x" << std::hex << videoFrame.FourCC << std::dec << "\n";
 
                     if (!g_fullscreen) {
                         SDL_SetWindowSize(window, videoWidth, videoHeight);
                         SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
                     }
-
-                    std::cout << "Video: " << videoWidth << "x" << videoHeight << "\n";
                 }
 
                 SDL_UpdateTexture(videoTexture, nullptr, videoFrame.p_data, videoFrame.line_stride_in_bytes);
@@ -493,8 +499,30 @@ void runViewer(SDL_Window* window, SDL_Renderer* renderer, const NDISourceInfo& 
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);
 
-        if (videoTexture) {
-            SDL_RenderCopy(renderer, videoTexture, nullptr, nullptr);
+        if (videoTexture && videoWidth > 0 && videoHeight > 0) {
+            // Preserve aspect ratio (letterbox/pillarbox)
+            int winW, winH;
+            SDL_GetWindowSize(window, &winW, &winH);
+
+            float videoAspect = (float)videoWidth / (float)videoHeight;
+            float windowAspect = (float)winW / (float)winH;
+
+            SDL_Rect dstRect;
+            if (windowAspect > videoAspect) {
+                // Window wider than video → pillarbox
+                dstRect.h = winH;
+                dstRect.w = (int)(winH * videoAspect);
+                dstRect.x = (winW - dstRect.w) / 2;
+                dstRect.y = 0;
+            } else {
+                // Window taller than video → letterbox
+                dstRect.w = winW;
+                dstRect.h = (int)(winW / videoAspect);
+                dstRect.x = 0;
+                dstRect.y = (winH - dstRect.h) / 2;
+            }
+
+            SDL_RenderCopy(renderer, videoTexture, nullptr, &dstRect);
         } else {
             int winW, winH;
             SDL_GetWindowSize(window, &winW, &winH);
@@ -581,7 +609,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Create window
-    SDL_Window* window = SDL_CreateWindow("NDI Viewer",
+    SDL_Window* window = SDL_CreateWindow((std::string("NDI Viewer ") + VIEWER_VERSION).c_str(),
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
         500, 450,
         SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);

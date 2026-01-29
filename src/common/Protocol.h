@@ -37,7 +37,7 @@ namespace ndi_bridge {
 constexpr uint32_t PROTOCOL_MAGIC = 0x4E444942;  // "NDIB"
 constexpr uint8_t  PROTOCOL_VERSION = 2;
 constexpr size_t   HEADER_SIZE = 38;
-constexpr size_t   DEFAULT_MTU = 1400;           // Safe MTU for UDP packets
+constexpr size_t   DEFAULT_MTU = 1200;           // Safe for WireGuard/Tailscale (MTU ~1280)
 constexpr size_t   MAX_UDP_PAYLOAD = DEFAULT_MTU - HEADER_SIZE;  // 1362 bytes
 constexpr size_t   MAX_PACKET_SIZE = DEFAULT_MTU;
 

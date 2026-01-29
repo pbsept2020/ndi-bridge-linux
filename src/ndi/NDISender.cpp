@@ -141,8 +141,8 @@ bool NDISender::sendVideo(const uint8_t* data, int width, int height, int stride
     // Detect frame rate from timestamps
     detectFrameRate(timestamp);
 
-    // Prepare NDI video frame
-    NDIlib_video_frame_v2_t videoFrame;
+    // Prepare NDI video frame - zero-initialize to avoid garbage in unused fields
+    NDIlib_video_frame_v2_t videoFrame = {};
     videoFrame.xres = width;
     videoFrame.yres = height;
     videoFrame.frame_rate_N = config_.frameRateN;
@@ -162,6 +162,9 @@ bool NDISender::sendVideo(const uint8_t* data, int width, int height, int stride
             break;
         case NDIVideoFormat::UYVY:
             videoFrame.FourCC = NDIlib_FourCC_video_type_UYVY;
+            break;
+        case NDIVideoFormat::I420:
+            videoFrame.FourCC = NDIlib_FourCC_video_type_I420;
             break;
     }
 

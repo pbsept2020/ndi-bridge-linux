@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=NDI Test Pattern
+Comment=Bouncing ball NDI source for testing
+Exec=/home/parallels/ndi-bridge-linux/build/ndi-test-pattern --name "VM Ball"
+Terminal=true
+Type=Application
+Categories=AudioVideo;
+Icon=video-display

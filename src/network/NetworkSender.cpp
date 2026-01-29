@@ -8,6 +8,8 @@
 #include <unistd.h>
 #include <cstring>
 #include <cerrno>
+#include <thread>
+#include <chrono>
 
 namespace ndi_bridge {
 
@@ -81,7 +83,8 @@ bool NetworkSender::connect(const std::string& host, uint16_t port) {
     }
 
     connected_ = true;
-    Logger::instance().successf("Connected to %s:%u", host.c_str(), port);
+    Logger::instance().successf("Connected to %s:%u (pacing: %dus between fragments)",
+        host.c_str(), port, config_.pacingDelayUs);
 
     if (onConnected_) {
         onConnected_(host + ":" + std::to_string(port));
@@ -140,6 +143,11 @@ bool NetworkSender::sendVideo(const uint8_t* data, size_t size, bool isKeyframe,
         if (!sendPacket(packet.data(), HEADER_SIZE + payloadSize)) {
             return false;
         }
+
+        // Pace fragments to avoid overwhelming the network tunnel
+        if (config_.pacingDelayUs > 0 && i + 1 < fragmentCount) {
+            std::this_thread::sleep_for(std::chrono::microseconds(config_.pacingDelayUs));
+        }
     }
 
     {
@@ -189,6 +197,11 @@ bool NetworkSender::sendAudio(const uint8_t* data, size_t size, uint64_t timesta
         // Send packet
         if (!sendPacket(packet.data(), HEADER_SIZE + payloadSize)) {
             return false;
+        }
+
+        // Pace fragments to avoid overwhelming the network tunnel
+        if (config_.pacingDelayUs > 0 && i + 1 < fragmentCount) {
+            std::this_thread::sleep_for(std::chrono::microseconds(config_.pacingDelayUs));
         }
     }
 

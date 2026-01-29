@@ -4,6 +4,10 @@
 #include <Processing.NDI.Lib.h>
 #include <cstring>
 
+#ifdef __APPLE__
+#include <CoreFoundation/CoreFoundation.h>
+#endif
+
 namespace ndi_bridge {
 
 // FourCC constants
@@ -65,8 +69,14 @@ std::vector<NDISource> NDIReceiver::discoverSources(int timeoutMs) {
 
     Logger::instance().infof("Searching for NDI sources (%d ms)...", timeoutMs);
 
-    // Wait for sources
-    NDIlib_find_wait_for_sources(static_cast<NDIlib_find_instance_t>(finder_), timeoutMs);
+    // Wait for sources by polling repeatedly (like NDI viewer does)
+    // NDIlib_find_wait_for_sources returns early when new sources appear,
+    // so we must loop to discover sources across multiple network interfaces
+    int elapsed = 0;
+    while (elapsed < timeoutMs) {
+        NDIlib_find_wait_for_sources(static_cast<NDIlib_find_instance_t>(finder_), 100);
+        elapsed += 100;
+    }
 
     // Get current sources
     uint32_t numSources = 0;
@@ -111,43 +121,51 @@ bool NDIReceiver::connect(const std::string& sourceName) {
 bool NDIReceiver::connect(const NDISource& source) {
     disconnect();
 
-    // Find the source in cached sources
-    const NDIlib_source_t* ndiSource = nullptr;
-
+    // Find the original NDIlib_source_t from the finder
+    // The SDK may require the original pointer (not a copy) for internal bookkeeping
+    const NDIlib_source_t* originalSource = nullptr;
     if (currentSources_ && numSources_ > 0) {
-        const NDIlib_source_t* sources = static_cast<const NDIlib_source_t*>(currentSources_);
+        auto sources = static_cast<const NDIlib_source_t*>(currentSources_);
         for (int i = 0; i < numSources_; i++) {
             if (sources[i].p_ndi_name && source.name == sources[i].p_ndi_name) {
-                ndiSource = &sources[i];
+                originalSource = &sources[i];
                 break;
             }
         }
     }
 
-    if (!ndiSource) {
-        Logger::instance().errorf("Source not in cache: %s", source.name.c_str());
-        return false;
-    }
-
-    // Create receiver
+    // Create receiver WITHOUT source, then connect via recv_connect
+    // (source_to_connect_to in create struct does NOT work reliably on macOS)
     NDIlib_recv_create_v3_t recvSettings;
     memset(&recvSettings, 0, sizeof(recvSettings));
 
-    recvSettings.source_to_connect_to = *ndiSource;
     recvSettings.color_format = config_.preferBGRA
         ? NDIlib_recv_color_format_BGRX_BGRA
         : NDIlib_recv_color_format_UYVY_BGRA;
     recvSettings.bandwidth = config_.lowBandwidth
         ? NDIlib_recv_bandwidth_lowest
         : NDIlib_recv_bandwidth_highest;
-    recvSettings.allow_video_fields = false;
-    recvSettings.p_ndi_recv_name = config_.receiverName.c_str();
+    recvSettings.allow_video_fields = true;
+    recvSettings.p_ndi_recv_name = nullptr;
 
     receiver_ = NDIlib_recv_create_v3(&recvSettings);
     if (!receiver_) {
         LOG_ERROR("Failed to create NDI receiver");
         return false;
     }
+
+    // Connect using recv_connect with a fresh source struct from name+url strings
+    // (same pattern as the Swift viewer — do NOT use the finder pointer directly)
+    NDIlib_source_t ndiSource;
+    ndiSource.p_ndi_name = source.name.c_str();
+    ndiSource.p_url_address = source.address.empty() ? nullptr : source.address.c_str();
+    NDIlib_recv_connect(
+        static_cast<NDIlib_recv_instance_t>(receiver_),
+        &ndiSource
+    );
+    Logger::instance().debugf("NDI recv_connect: name='%s' url='%s'",
+                              source.name.c_str(),
+                              source.address.empty() ? "(auto)" : source.address.c_str());
 
     connected_ = true;
     connectedSourceName_ = source.name;
@@ -168,8 +186,29 @@ void NDIReceiver::disconnect() {
     connectedSourceName_.clear();
 }
 
+void NDIReceiver::prepareConnect(const NDISource& source) {
+    pendingSource_ = source;
+    hasPendingConnect_ = true;
+    connected_ = true;
+    connectedSourceName_ = source.name;
+
+    // Find index in original finder sources for direct pointer use
+    pendingSourceIdx_ = -1;
+    if (currentSources_ && numSources_ > 0) {
+        auto sources = static_cast<const NDIlib_source_t*>(currentSources_);
+        for (int i = 0; i < numSources_; i++) {
+            if (sources[i].p_ndi_name && source.name == sources[i].p_ndi_name) {
+                pendingSourceIdx_ = i;
+                break;
+            }
+        }
+    }
+    Logger::instance().successf("Prepared deferred connect: %s (finder idx=%d)",
+                                source.name.c_str(), pendingSourceIdx_);
+}
+
 void NDIReceiver::startReceiving() {
-    if (!connected_ || receiving_) {
+    if (!(connected_ || hasPendingConnect_) || receiving_) {
         return;
     }
 
@@ -201,13 +240,14 @@ NDIVideoFrame NDIReceiver::captureVideoFrame(int timeoutMs) {
     }
 
     NDIlib_video_frame_v2_t videoFrame;
-    NDIlib_audio_frame_v3_t audioFrame;
+    NDIlib_audio_frame_v2_t audioFrame;
+    NDIlib_metadata_frame_t metadataFrame;
 
-    auto frameType = NDIlib_recv_capture_v3(
+    auto frameType = NDIlib_recv_capture_v2(
         static_cast<NDIlib_recv_instance_t>(receiver_),
         &videoFrame,
         &audioFrame,
-        nullptr,
+        &metadataFrame,
         static_cast<uint32_t>(timeoutMs)
     );
 
@@ -234,10 +274,14 @@ NDIVideoFrame NDIReceiver::captureVideoFrame(int timeoutMs) {
 
         stats_.videoFramesReceived++;
     } else if (frameType == NDIlib_frame_type_audio) {
-        // Free audio frame if received
-        NDIlib_recv_free_audio_v3(
+        NDIlib_recv_free_audio_v2(
             static_cast<NDIlib_recv_instance_t>(receiver_),
             &audioFrame
+        );
+    } else if (frameType == NDIlib_frame_type_metadata) {
+        NDIlib_recv_free_metadata(
+            static_cast<NDIlib_recv_instance_t>(receiver_),
+            &metadataFrame
         );
     }
 
@@ -245,17 +289,79 @@ NDIVideoFrame NDIReceiver::captureVideoFrame(int timeoutMs) {
 }
 
 void NDIReceiver::receiveLoop() {
-    NDIlib_video_frame_v2_t videoFrame;
-    NDIlib_audio_frame_v3_t audioFrame;
+    // Deferred connect: create receiver + connect on THIS thread
+    // (NDI SDK on macOS requires connect and capture on the same thread)
+    if (hasPendingConnect_) {
+        hasPendingConnect_ = false;
 
+        NDIlib_recv_create_v3_t recvSettings;
+        memset(&recvSettings, 0, sizeof(recvSettings));
+        recvSettings.color_format = config_.preferBGRA
+            ? NDIlib_recv_color_format_BGRX_BGRA
+            : NDIlib_recv_color_format_UYVY_BGRA;
+        recvSettings.bandwidth = config_.lowBandwidth
+            ? NDIlib_recv_bandwidth_lowest
+            : NDIlib_recv_bandwidth_highest;
+        recvSettings.allow_video_fields = true;
+        recvSettings.p_ndi_recv_name = nullptr;
+
+        receiver_ = NDIlib_recv_create_v3(&recvSettings);
+        if (!receiver_) {
+            LOG_ERROR("Failed to create NDI receiver on receive thread");
+            receiving_ = false;
+            return;
+        }
+
+        // Use original finder source pointer if available (has internal SDK metadata)
+        if (pendingSourceIdx_ >= 0 && currentSources_) {
+            auto sources = static_cast<const NDIlib_source_t*>(currentSources_);
+            NDIlib_recv_connect(
+                static_cast<NDIlib_recv_instance_t>(receiver_),
+                &sources[pendingSourceIdx_]
+            );
+            Logger::instance().debugf("NDI recv_connect (finder ptr, recv thread): name='%s'",
+                                      sources[pendingSourceIdx_].p_ndi_name);
+        } else {
+            NDIlib_source_t ndiSource;
+            ndiSource.p_ndi_name = pendingSource_.name.c_str();
+            ndiSource.p_url_address = pendingSource_.address.empty() ? nullptr : pendingSource_.address.c_str();
+            NDIlib_recv_connect(
+                static_cast<NDIlib_recv_instance_t>(receiver_),
+                &ndiSource
+            );
+            Logger::instance().debugf("NDI recv_connect (string, recv thread): name='%s'",
+                                      pendingSource_.name.c_str());
+        }
+    }
+
+    NDIlib_video_frame_v2_t videoFrame;
+    NDIlib_audio_frame_v2_t audioFrame;
+    NDIlib_metadata_frame_t metadataFrame;
+
+    int loopCount = 0;
     while (receiving_) {
-        auto frameType = NDIlib_recv_capture_v3(
+        auto frameType = NDIlib_recv_capture_v2(
             static_cast<NDIlib_recv_instance_t>(receiver_),
             &videoFrame,
             &audioFrame,
-            nullptr,
-            100  // 100ms timeout
+            &metadataFrame,
+            100  // 100ms timeout (must be short for CFRunLoop pump)
         );
+
+#ifdef __APPLE__
+        // Pump CFRunLoop on THIS thread — NDI SDK registers CoreFoundation
+        // callbacks on the thread that calls recv_connect/recv_capture.
+        // Without this, the SDK never completes the connection handshake.
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.001, false);
+#endif
+
+        loopCount++;
+        if (loopCount <= 10 || loopCount % 30 == 0) {
+            int nConn = NDIlib_recv_get_no_connections(
+                static_cast<NDIlib_recv_instance_t>(receiver_));
+            Logger::instance().debugf("recv loop #%d: type=%d connections=%d",
+                                      loopCount, (int)frameType, nConn);
+        }
 
         switch (frameType) {
             case NDIlib_frame_type_video:
@@ -292,30 +398,21 @@ void NDIReceiver::receiveLoop() {
                     frame.samplesPerChannel = audioFrame.no_samples;
                     frame.timestamp = audioFrame.timestamp;
 
-                    // Check if planar (channel_stride > 0) or interleaved
-                    frame.isPlanar = (audioFrame.channel_stride_in_bytes > 0);
+                    // v2 audio is always planar float
+                    frame.isPlanar = true;
 
-                    if (frame.isPlanar) {
-                        // Planar format: channel_stride bytes per channel
-                        size_t totalSamples = static_cast<size_t>(audioFrame.no_samples) *
-                                              static_cast<size_t>(audioFrame.no_channels);
-                        frame.data.resize(totalSamples);
+                    size_t totalSamples = static_cast<size_t>(audioFrame.no_samples) *
+                                          static_cast<size_t>(audioFrame.no_channels);
+                    frame.data.resize(totalSamples);
 
-                        // Copy each channel
+                    if (audioFrame.channel_stride_in_bytes > 0) {
                         for (int ch = 0; ch < audioFrame.no_channels; ch++) {
-                            const float* src = reinterpret_cast<const float*>(
-                                audioFrame.p_data + ch * audioFrame.channel_stride_in_bytes
-                            );
+                            const float* src = audioFrame.p_data + ch * (audioFrame.channel_stride_in_bytes / sizeof(float));
                             float* dst = frame.data.data() + ch * audioFrame.no_samples;
                             std::memcpy(dst, src, audioFrame.no_samples * sizeof(float));
                         }
                     } else {
-                        // Interleaved format
-                        size_t totalSamples = static_cast<size_t>(audioFrame.no_samples) *
-                                              static_cast<size_t>(audioFrame.no_channels);
-                        frame.data.resize(totalSamples);
-                        std::memcpy(frame.data.data(),
-                                    reinterpret_cast<const float*>(audioFrame.p_data),
+                        std::memcpy(frame.data.data(), audioFrame.p_data,
                                     totalSamples * sizeof(float));
                     }
 
@@ -323,14 +420,20 @@ void NDIReceiver::receiveLoop() {
                     stats_.audioFramesReceived++;
                 }
 
-                NDIlib_recv_free_audio_v3(
+                NDIlib_recv_free_audio_v2(
                     static_cast<NDIlib_recv_instance_t>(receiver_),
                     &audioFrame
                 );
                 break;
 
+            case NDIlib_frame_type_metadata:
+                NDIlib_recv_free_metadata(
+                    static_cast<NDIlib_recv_instance_t>(receiver_),
+                    &metadataFrame
+                );
+                break;
+
             case NDIlib_frame_type_none:
-                // No frame available, continue
                 break;
 
             case NDIlib_frame_type_error:

@@ -77,7 +77,9 @@ bool VideoDecoder::initDecoder() {
     }
 
     // Configure for low-latency decoding
-    codecCtx_->thread_count = 0;  // Auto-detect
+    // Single-threaded: frame threading on emulated x86_64 produces
+    // incomplete frames (all-zero data) due to race conditions
+    codecCtx_->thread_count = 1;
     codecCtx_->flags |= AV_CODEC_FLAG_LOW_DELAY;
     codecCtx_->flags2 |= AV_CODEC_FLAG2_FAST;
 
@@ -108,7 +110,7 @@ bool VideoDecoder::initDecoder() {
     return true;
 }
 
-bool VideoDecoder::initScaler(int width, int height) {
+bool VideoDecoder::initScaler(int width, int height, int srcPixelFormat) {
     // Clean up existing scaler
     if (swsCtx_) {
         sws_freeContext(swsCtx_);
@@ -119,7 +121,7 @@ bool VideoDecoder::initScaler(int width, int height) {
         convertedFrame_ = nullptr;
     }
 
-    AVPixelFormat srcFormat = codecCtx_->pix_fmt;
+    AVPixelFormat srcFormat = static_cast<AVPixelFormat>(srcPixelFormat);
     AVPixelFormat dstFormat = toAVPixelFormat(config_.outputFormat);
 
     // If formats match, no conversion needed
@@ -143,7 +145,7 @@ bool VideoDecoder::initScaler(int width, int height) {
         return false;
     }
 
-    // Allocate converted frame
+    // Allocate converted frame with FFmpeg-managed aligned buffer
     convertedFrame_ = av_frame_alloc();
     if (!convertedFrame_) {
         LOG_ERROR("Failed to allocate converted frame");
@@ -154,11 +156,17 @@ bool VideoDecoder::initScaler(int width, int height) {
     convertedFrame_->width = width;
     convertedFrame_->height = height;
 
-    int ret = av_frame_get_buffer(convertedFrame_, 0);
+    int ret = av_frame_get_buffer(convertedFrame_, 32); // 32-byte alignment
     if (ret < 0) {
-        LOG_ERROR("Failed to allocate converted frame buffer");
+        char errbuf[256];
+        av_strerror(ret, errbuf, sizeof(errbuf));
+        Logger::instance().errorf("Failed to allocate converted frame buffer: %s", errbuf);
+        av_frame_free(&convertedFrame_);
         return false;
     }
+
+    Logger::instance().debugf("Scaler output: %dx%d linesize=%d (av_frame_get_buffer, aligned)",
+        width, height, convertedFrame_->linesize[0]);
 
     return true;
 }
@@ -256,13 +264,73 @@ bool VideoDecoder::decode(const uint8_t* data, size_t size, uint64_t timestamp) 
         return false;
     }
 
-    // Parse NAL units from Annex-B stream
+    // Parse NAL units to extract SPS/PPS and track keyframes
     auto nalUnits = parseNALUnits(data, size);
+    bool hasIDR = false;
 
     for (const auto& nal : nalUnits) {
-        if (!processNALUnit(nal, timestamp)) {
+        if (nal.type == NAL_TYPE_SPS) {
+            Logger::instance().debugf("Received SPS (%zu bytes)", nal.size);
+            sps_.assign(nal.data, nal.data + nal.size);
+        } else if (nal.type == NAL_TYPE_PPS) {
+            Logger::instance().debugf("Received PPS (%zu bytes)", nal.size);
+            pps_.assign(nal.data, nal.data + nal.size);
+            decoderReady_ = !sps_.empty();
+            if (decoderReady_) {
+                LOG_SUCCESS("Decoder ready (SPS/PPS received)");
+            }
+        } else if (nal.type == NAL_TYPE_IDR) {
+            hasIDR = true;
+        }
+    }
+
+    if (!decoderReady_) {
+        LOG_DEBUG("Waiting for keyframe (SPS/PPS)");
+        return true;
+    }
+
+    if (hasIDR) {
+        stats_.keyframesDecoded++;
+    }
+
+    // Send the ENTIRE Annex-B frame as one packet to the decoder.
+    // Previously, each NAL/slice was sent individually, causing the decoder
+    // to output partial frames with concealment errors for missing slices.
+    av_packet_unref(packet_);
+    packet_->data = const_cast<uint8_t*>(data);
+    packet_->size = static_cast<int>(size);
+    packet_->pts = static_cast<int64_t>(timestamp);
+    packet_->dts = packet_->pts;
+
+    int ret = avcodec_send_packet(codecCtx_, packet_);
+    if (ret < 0) {
+        if (ret == AVERROR(EAGAIN)) {
+            // Decoder full, try to receive frames
+        } else if (ret == AVERROR_EOF) {
+            return true;
+        } else {
+            char errbuf[256];
+            av_strerror(ret, errbuf, sizeof(errbuf));
+            Logger::instance().errorf("Failed to send packet: %s", errbuf);
+            stats_.decodeErrors++;
             return false;
         }
+    }
+
+    // Receive decoded frames (should be exactly 1 per input frame now)
+    while (ret >= 0) {
+        ret = avcodec_receive_frame(codecCtx_, frame_);
+        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+            break;
+        } else if (ret < 0) {
+            char errbuf[256];
+            av_strerror(ret, errbuf, sizeof(errbuf));
+            Logger::instance().errorf("Failed to receive frame: %s", errbuf);
+            stats_.decodeErrors++;
+            return false;
+        }
+        processDecodedFrame(frame_, timestamp);
+        av_frame_unref(frame_);
     }
 
     return true;
@@ -387,14 +455,27 @@ bool VideoDecoder::decodeNALUnit(const NALUnit& nal, uint64_t timestamp) {
 }
 
 void VideoDecoder::processDecodedFrame(AVFrame* frame, uint64_t timestamp) {
+    // Diagnostic log for first 5 frames
+    if (stats_.framesDecoded < 5) {
+        // Check raw YUV data
+        uint8_t y0 = frame->data[0] ? frame->data[0][0] : 0;
+        uint8_t u0 = frame->data[1] ? frame->data[1][0] : 0;
+        uint8_t v0 = frame->data[2] ? frame->data[2][0] : 0;
+        Logger::instance().debugf("Decoded[%lu]: fmt=%s linesize=[%d,%d,%d] %dx%d Y[0]=%d U[0]=%d V[0]=%d",
+            stats_.framesDecoded,
+            av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format)),
+            frame->linesize[0], frame->linesize[1], frame->linesize[2],
+            frame->width, frame->height, y0, u0, v0);
+    }
+
     // Update dimensions if changed
     if (width_ != frame->width || height_ != frame->height) {
         width_ = frame->width;
         height_ = frame->height;
         Logger::instance().infof("Video dimensions: %dx%d", width_, height_);
 
-        // Reinitialize scaler for new dimensions
-        if (!initScaler(width_, height_)) {
+        // Reinitialize scaler for new dimensions, using actual frame pixel format
+        if (!initScaler(width_, height_, frame->format)) {
             LOG_ERROR("Failed to initialize scaler for new dimensions");
             return;
         }
@@ -405,18 +486,22 @@ void VideoDecoder::processDecodedFrame(AVFrame* frame, uint64_t timestamp) {
     // Convert pixel format if needed
     AVFrame* outputFrame = frame;
     if (swsCtx_ && convertedFrame_) {
-        int ret = av_frame_make_writable(convertedFrame_);
-        if (ret < 0) {
-            LOG_ERROR("Failed to make converted frame writable");
-            return;
-        }
-
+        av_frame_make_writable(convertedFrame_);
         sws_scale(
             swsCtx_,
             frame->data, frame->linesize,
             0, frame->height,
             convertedFrame_->data, convertedFrame_->linesize
         );
+
+        // Diagnostic: log first BGRA pixel of first 3 frames
+        if (stats_.framesDecoded < 3 && convertedFrame_->data[0]) {
+            uint8_t* px = convertedFrame_->data[0];
+            Logger::instance().debugf("BGRA pixel[0]: B=%d G=%d R=%d A=%d  stride=%d  buf_align=%p",
+                px[0], px[1], px[2], px[3],
+                convertedFrame_->linesize[0],
+                (void*)convertedFrame_->data[0]);
+        }
 
         outputFrame = convertedFrame_;
     }
@@ -432,7 +517,7 @@ void VideoDecoder::processDecodedFrame(AVFrame* frame, uint64_t timestamp) {
         // Calculate output size and stride
         if (config_.outputFormat == OutputPixelFormat::BGRA ||
             config_.outputFormat == OutputPixelFormat::UYVY) {
-            // Packed formats
+            // Packed formats - use FFmpeg stride as-is (may include padding)
             decodedFrame.stride = outputFrame->linesize[0];
             size_t dataSize = static_cast<size_t>(decodedFrame.stride) * height_;
             decodedFrame.data.resize(dataSize);

@@ -32,7 +32,8 @@ struct NDISenderConfig {
  */
 enum class NDIVideoFormat {
     BGRA,       // 32-bit BGRA
-    UYVY        // 16-bit packed YUV 4:2:2
+    UYVY,       // 16-bit packed YUV 4:2:2
+    I420        // Planar YUV 4:2:0 (3 planes: Y, U, V)
 };
 
 /**
