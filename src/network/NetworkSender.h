@@ -22,8 +22,8 @@ namespace ndi_bridge {
 struct NetworkSenderConfig {
     std::string host = "127.0.0.1";
     uint16_t port = 5990;
-    size_t mtu = 1400;  // Safe MTU for UDP payload
-    int pacingDelayUs = 500;  // Microseconds between fragment sends (0 = no pacing)
+    size_t mtu = 1400;  // Match Mac bridge MTU
+    int pacingDelayUs = 0;  // No pacing — fire-and-forget like Mac (non-blocking UDP)
 };
 
 /**

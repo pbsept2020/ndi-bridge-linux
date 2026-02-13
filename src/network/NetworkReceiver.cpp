@@ -126,8 +126,8 @@ void NetworkReceiver::receiveLoop() {
     pfd.events = POLLIN;
 
     while (!shouldStop_) {
-        // Poll with 100ms timeout
-        int ret = poll(&pfd, 1, 100);
+        // Poll with 10ms timeout (reduce jitter vs 100ms)
+        int ret = poll(&pfd, 1, 10);
 
         if (ret < 0) {
             if (errno == EINTR) continue;

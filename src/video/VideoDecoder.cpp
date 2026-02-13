@@ -76,9 +76,10 @@ bool VideoDecoder::initDecoder() {
         return false;
     }
 
-    // Configure for low-latency decoding
-    // Single-threaded: frame threading on emulated x86_64 produces
-    // incomplete frames (all-zero data) due to race conditions
+    // Configure for lowest-latency decoding (match Mac synchronous VTDecompression)
+    // thread_count=1: FFmpeg's multi-threaded H264 uses frame-level parallelism
+    // which buffers N-1 frames. Single-thread = zero buffering, decode-on-demand.
+    // Mac achieves this with VTDecompressionSessionWaitForAsynchronousFrames().
     codecCtx_->thread_count = 1;
     codecCtx_->flags |= AV_CODEC_FLAG_LOW_DELAY;
     codecCtx_->flags2 |= AV_CODEC_FLAG2_FAST;

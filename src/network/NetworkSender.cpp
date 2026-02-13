@@ -6,6 +6,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <cstring>
 #include <cerrno>
 #include <thread>
@@ -52,8 +53,8 @@ bool NetworkSender::connect(const std::string& host, uint16_t port) {
     int optval = 1;
     setsockopt(socket_, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
 
-    // Increase send buffer size for better throughput
-    int sendbuf = 2 * 1024 * 1024;  // 2MB
+    // Increase send buffer size — match Mac's aggressive non-blocking pattern
+    int sendbuf = 4 * 1024 * 1024;  // 4MB
     setsockopt(socket_, SOL_SOCKET, SO_SNDBUF, &sendbuf, sizeof(sendbuf));
 
     // Setup destination address
@@ -82,8 +83,14 @@ bool NetworkSender::connect(const std::string& host, uint16_t port) {
         return false;
     }
 
+    // Set non-blocking mode for fire-and-forget UDP (match Mac .idempotent send)
+    int flags = fcntl(socket_, F_GETFL, 0);
+    if (flags >= 0) {
+        fcntl(socket_, F_SETFL, flags | O_NONBLOCK);
+    }
+
     connected_ = true;
-    Logger::instance().successf("Connected to %s:%u (pacing: %dus between fragments)",
+    Logger::instance().successf("Connected to %s:%u (non-blocking, pacing: %dus)",
         host.c_str(), port, config_.pacingDelayUs);
 
     if (onConnected_) {
@@ -218,9 +225,14 @@ bool NetworkSender::sendRaw(const uint8_t* data, size_t size) {
 }
 
 bool NetworkSender::sendPacket(const uint8_t* data, size_t size) {
-    ssize_t sent = send(socket_, data, size, 0);
+    ssize_t sent = send(socket_, data, size, MSG_DONTWAIT);
 
     if (sent < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            // Non-blocking socket: kernel buffer full — drop packet (real-time behavior)
+            // This matches Mac's .idempotent send completion (fire-and-forget)
+            return true;
+        }
         Logger::instance().errorf("Send error: %s", strerror(errno));
         {
             std::lock_guard<std::mutex> lock(statsMutex_);

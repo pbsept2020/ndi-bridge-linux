@@ -90,7 +90,7 @@ bool NDISender::start(int width, int height, double frameRate) {
     NDIlib_send_create_t sendCreate;
     sendCreate.p_ndi_name = sourceName_.c_str();
     sendCreate.p_groups = nullptr;
-    sendCreate.clock_video = true;  // Use video timing
+    sendCreate.clock_video = false;  // Don't pace — relay in real-time (match Mac)
     sendCreate.clock_audio = false;
 
     sender_ = NDIlib_send_create(&sendCreate);

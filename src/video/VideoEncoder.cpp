@@ -98,7 +98,7 @@ bool VideoEncoder::initEncoder() {
     codecCtx_->pix_fmt = AV_PIX_FMT_YUV420P;  // x264 prefers YUV420P
     codecCtx_->bit_rate = config_.bitrate;
     codecCtx_->rc_max_rate = config_.bitrate * 3 / 2;  // Peak = 1.5x average
-    codecCtx_->rc_buffer_size = config_.bitrate;       // 1 second buffer
+    codecCtx_->rc_buffer_size = config_.bitrate / config_.fps;  // 1 frame buffer (match VideoToolbox)
     codecCtx_->gop_size = config_.keyframeInterval;
     codecCtx_->max_b_frames = 0;                       // No B-frames for low latency
     codecCtx_->thread_count = 0;                       // Auto-detect threads
@@ -113,10 +113,13 @@ bool VideoEncoder::initEncoder() {
     av_dict_set(&opts, "tune", config_.tune.c_str(), 0);
     av_dict_set(&opts, "profile", config_.profile.c_str(), 0);
 
-    // Additional low-latency options
+    // Additional low-latency options (match Mac's MaxFrameDelayCount=0)
     av_dict_set(&opts, "rc-lookahead", "0", 0);
     av_dict_set(&opts, "sync-lookahead", "0", 0);
-    av_dict_set(&opts, "sliced-threads", "0", 0);
+    // NOTE: Do NOT set sliced-threads=0 here — tune=zerolatency enables
+    // sliced-threads=1 which gives multi-thread performance with ZERO added
+    // frame latency. Disabling it forces frame-level threading that adds
+    // N-1 frames of buffering delay (was the cause of ~100ms extra latency).
 
     // Open codec
     int ret = avcodec_open2(codecCtx_, codec, &opts);
