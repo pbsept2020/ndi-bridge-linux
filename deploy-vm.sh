@@ -3,9 +3,12 @@ VM="Ubuntu 22.04.2 (x86_64 emulation) (1)"
 SRC=~/Projets/ndi-bridge-linux
 
 echo "=== 1/5 Killing ALL old processes ==="
-prlctl exec "$VM" sudo killall -9 ndi-bridge ndi-viewer 2>/dev/null
-prlctl exec "$VM" sudo pkill -9 -f ndi-bridge 2>/dev/null
+prlctl exec "$VM" sudo killall -9 ndi-bridge ndi-viewer ndi-test-pattern 2>/dev/null
+prlctl exec "$VM" sudo pkill -9 -f "ndi-bridge\|ndi-viewer\|ndi-test-pattern" 2>/dev/null
 sleep 2
+
+echo "=== 1.5/5 Installing dependencies ==="
+prlctl exec "$VM" dpkg -s libltc-dev > /dev/null 2>&1 || prlctl exec "$VM" sudo apt-get install -y libltc-dev 2>&1 | tail -3
 
 echo "=== 2/5 Copying ALL source files ==="
 for f in $(cd "$SRC" && find src -name "*.cpp" -o -name "*.h" | sort) CMakeLists.txt cmake/FindNDI.cmake; do
@@ -18,6 +21,7 @@ echo "=== 3/5 Clean build ==="
 prlctl exec "$VM" rm -rf /home/parallels/ndi-bridge-linux/build/CMakeFiles/ndi_bridge_common.dir 2>&1
 prlctl exec "$VM" rm -rf /home/parallels/ndi-bridge-linux/build/CMakeFiles/ndi-bridge.dir 2>&1
 prlctl exec "$VM" rm -rf /home/parallels/ndi-bridge-linux/build/CMakeFiles/ndi-test-pattern.dir 2>&1
+prlctl exec "$VM" rm -rf /home/parallels/ndi-bridge-linux/build/CMakeFiles/ndi-viewer.dir 2>&1
 prlctl exec "$VM" cmake -B /home/parallels/ndi-bridge-linux/build /home/parallels/ndi-bridge-linux 2>&1 | tail -5
 prlctl exec "$VM" cmake --build /home/parallels/ndi-bridge-linux/build 2>&1 | tail -15
 
