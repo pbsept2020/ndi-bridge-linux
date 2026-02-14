@@ -323,7 +323,7 @@ La version est définie dans `src/common/Version.h` (macro `NDI_BRIDGE_VERSION`)
 Ce fichier est inclus par `main.cpp`, `ndi_viewer.cpp` et `ndi_test_pattern.cpp`.
 **Ne jamais** définir la version dans un autre fichier.
 
-## Déploiement sur la VM Linux
+## Déploiement (VM locale ou EC2)
 
 Utiliser `deploy-vm.sh` qui fait tout automatiquement :
 1. Tue les anciens processus (ndi-bridge, ndi-viewer, ndi-test-pattern)
@@ -339,7 +339,7 @@ bash deploy-vm.sh
 
 Après le deploy, lancer le host côté Mac :
 ```bash
-sudo ./build-mac/ndi-bridge host --source "P20064" --target 172.20.10.5:5990 -v
+./build-mac/ndi-bridge host --source "Test Pattern LTC" --target 54.93.225.67:5990 -v
 ```
 
 ## Build
@@ -366,67 +366,68 @@ Tout saut/saccade de la bille = dropped frames. Carré blanc clignotant en haut 
 - Inclus dans `Version.h` pour le numéro de version
 - Build : cible CMake `ndi-test-pattern`
 
-## État actuel (v1.8-slicefix)
+## État actuel (v1.9 — 14 fév 2026)
 
-### Bridge Mac → Linux (host Mac, join Linux) — FONCTIONNE
-- Vidéo : `dropped=0`, ratio decoded/recv ≈ 1:1
-- ~5-7 fps au lieu de 25-30 : VM Parallels x86_64 émulée sur ARM64
-- Audio : passe (audio frames reçues côté join)
-- Réseau testé : Parallels direct (172.20.10.5), 8 Mbps, MTU 1200
+### Ce qui marche
+- **Build cross-platform** : Mac (build-mac/) et Linux (build/) depuis le même codebase C++
+- **Host Mac → EC2 Frankfurt** : zero-drop, ~29fps, audio OK
+- **Join EC2 décode et publie en NDI** : dropped=0, qdrop=0, decode_ms ~11ms
+- **Host EC2 → Mac** : encode et envoie OK (eagain_drops=0)
+- **NDI Viewer v1.9** : 10 pro features (OSD, safe area, grid, tally, source switching)
+- **Test pattern avec LTC** : timecode embarqué, full-range color, H.264
+- **deploy-vm.sh** : mis à jour pour EC2 (libltc-dev, kill test-pattern, clean viewer)
 
-### Bridge Linux → Mac (host Linux, join Mac) — PARTIELLEMENT TESTÉ (29 jan 2026)
+### Ce qui bloque
+- **Retour EC2→Mac bloqué par NAT** : le host EC2 envoie vers 80.12.254.168:5991 mais la box ne forward pas UDP entrant. Solutions : port forwarding sur box/Peplink, ou tunnel SpeedFusion.
+- **Exclude pattern trop agressif** : le host filtre toute source contenant "Bridge" AVANT de vérifier --source explicite. Quand --source est explicite, le filtre ne devrait pas s'appliquer. Voir findNDISource() lignes 325-330.
 
-**Ce qui fonctionne :**
-- `ndi-test-pattern` sur la VM émet la source NDI "VM Ball" ✓
-- Le host Linux capture "VM Ball", encode en H.264, envoie par UDP ✓
-- Le join Mac reçoit les paquets, décode, et envoie au NDI sender ✓
-- Stats : `dropped=0`, `decoded/recv ≈ 1:1`, audio=462 frames ✓
-- La source "Linux Ball" apparaît dans NDI Studio Monitor ✓
+### Infra EC2 Frankfurt (eu-central-1)
+- Instance : ltc-ndi-test (t3.medium spot)
+- IP publique : 54.93.225.67
+- IP privée : 172.31.44.6
+- Clé SSH : ~/.secrets/aws/ltc-ndi-test-frankfurt.pem
+- User : ubuntu
+- Commande : `ssh -i ~/.secrets/aws/ltc-ndi-test-frankfurt.pem ubuntu@54.93.225.67`
+- NDI Discovery Server : 3.74.169.239
+- SG : sg-0761c1bb83aecc17a (NDI_Security_aws_group)
+- Déployé : ndi-bridge-linux compilé, NDI SDK Linux 6, libltc-dev
 
-**Ce qui ne fonctionne PAS encore :**
-- Studio Monitor voit la source "Linux Ball" mais n'affiche pas l'image
-- Cause probable : le framerate détecté (6.95 fps) est non-standard,
-  ou le NDI sender sur Mac a un problème de format/connexion
-- À investiguer : vérifier si `NDIlib_send_get_no_connections()` retourne >0
-  quand Studio Monitor se connecte à "Linux Ball"
+### IP Mac (14 fév 2026)
+- IP publique : 80.12.254.168
+- IP locale : 192.168.8.101
+- Tailscale : 100.126.165.122
 
-**IPs réseau Parallels (29 jan 2026) :**
-- Mac : 172.20.10.4
-- VM Linux : 172.20.10.5
-- **Attention** : ces IPs peuvent changer au redémarrage de Parallels
+### Déploiement EC2
+Utiliser `deploy-vm.sh` (mis à jour pour EC2) :
+- Installe libltc-dev
+- Tue les anciens processus
+- Copie, build, relance test-pattern + join
+
+### Commandes de test validées (14 fév 2026)
+```bash
+# Sur EC2 — lancer le join
+~/ndi-bridge-linux/build/ndi-bridge join --name "Test Pattern EC2" --port 5990 -v
+
+# Sur Mac — lancer le host vers EC2
+./build-mac/ndi-bridge host --source "Test Pattern LTC" --target 54.93.225.67:5990 -v
+
+# Sur Mac — lancer le join retour (port 5991)
+./build-mac/ndi-bridge join --name "EC2 Bridge" --port 5991 -v
+
+# Sur EC2 — lancer le host retour vers Mac
+~/ndi-bridge-linux/build/ndi-bridge host --source "Test Pattern EC2" --target <IP_MAC>:5991 -v
+```
+
+### IMPORTANT pour Claude Code
+- La source NDI s'appelle **"Test Pattern LTC"** (PAS "P20064", PAS "WebCam")
+- Le nom du join sur EC2 ne doit PAS contenir "Bridge" (sinon filtré par excludePatterns)
+- Ne PAS lancer le flux vidéo via Tailscale (100.x.x.x) — perte massive de paquets
 
 ### Prochaines étapes
-1. **Débugger l'affichage "Linux Ball"** dans Studio Monitor (framerate ? format ?)
-2. Tester sur l'Alienware (hardware natif x86_64) pour valider les fps
-3. Tester le bridge bidirectionnel (host+join sur chaque machine)
-4. Optimiser la latence (buffer, GOP, pacing)
-
-## Test WAN prévu : EC2 Mac (mac2.metal)
-
-### Objectif
-Valider le bridge sur un vrai réseau WAN avec du hardware Mac natif (pas d'émulation).
-Tester le montage PiP via OBS sur l'EC2 et récupérer le flux composé.
-
-### Scénario
-```
-Mac local (host) → UDP/WAN → EC2 Mac (join) → OBS (PiP) → NDI out
-                                                              ↓
-Mac local (join) ← UDP/WAN ← EC2 Mac (host) ←────────────────┘
-```
-
-### Setup EC2
-- Instance : `mac2.metal` (~20-24$/jour, minimum 24h — contrainte Apple)
-- Region : eu-central-1 ou eu-west-1 (latence ~20-40ms depuis Paris)
-- Security group : UDP 5990-5991 inbound depuis IP locale, SSH 22
-- Installer sur l'EC2 : NDI SDK, FFmpeg, OBS, cloner le repo et build
-- **Préparer le plan de test AVANT de lancer l'instance** pour rentabiliser la journée
-
-### Ce qu'on valide
-1. Bridge fonctionne en WAN (UDP sur internet, pas juste réseau local)
-2. Framerate réel sur hardware natif Mac (vs ~7 fps sur VM émulée)
-3. Latence end-to-end sur un vrai réseau
-4. Bridge bidirectionnel (les deux machines font host+join)
-5. OBS capture le NDI bridgé et compose un PiP
+1. **Résoudre le NAT retour** — port forwarding UDP 5991 sur la box ou utiliser SpeedFusion
+2. **Fix exclude pattern** — quand --source est explicite, bypasser excludePatterns dans findNDISource()
+3. **Tester round-trip complet** une fois le NAT résolu
+4. **Mesurer latence end-to-end** (LTC timecode permet la mesure précise)
 
 ## Protocole
 
