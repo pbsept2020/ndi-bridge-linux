@@ -1,1 +1,0 @@
-/usr/bin/c++  -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names "CMakeFiles/codec-test.dir/src/tests/codec_test.cpp.o" -o codec-test   -L/usr/local/lib  -L/opt/homebrew/lib  -Wl,-rpath,/usr/local/lib -Wl,-rpath,/opt/homebrew/lib libndi_bridge_common.a /usr/local/lib/libndi.dylib -lavcodec -lavutil -lswscale
