@@ -50,6 +50,39 @@ if(NOT AVCODEC_FOUND)
     message(WARNING "Install with: sudo apt install libavcodec-dev libavutil-dev libswscale-dev")
 endif()
 
+# libltc (LTC timecode encoding/decoding)
+if(PKG_CONFIG_FOUND)
+    pkg_check_modules(LTC ltc)
+endif()
+
+# Fallback manual detection for libltc
+if(NOT LTC_FOUND)
+    find_library(LTC_LIBRARIES NAMES ltc)
+    find_path(LTC_INCLUDE_DIRS ltc.h)
+    if(LTC_LIBRARIES AND LTC_INCLUDE_DIRS)
+        set(LTC_FOUND TRUE)
+    endif()
+endif()
+
+# Fallback: macOS Homebrew for libltc
+if(NOT LTC_FOUND AND APPLE)
+    set(HOMEBREW_PREFIX "/opt/homebrew")
+    if(EXISTS "${HOMEBREW_PREFIX}/include/ltc.h")
+        message(STATUS "Found libltc via Homebrew")
+        set(LTC_FOUND TRUE)
+        set(LTC_INCLUDE_DIRS "${HOMEBREW_PREFIX}/include")
+        set(LTC_LIBRARY_DIRS "${HOMEBREW_PREFIX}/lib")
+        set(LTC_LIBRARIES "ltc")
+    endif()
+endif()
+
+if(LTC_FOUND)
+    message(STATUS "Found libltc: ${LTC_LIBRARIES}")
+else()
+    message(WARNING "libltc not found - LTC timecode will not be available in test pattern")
+    message(WARNING "Install with: brew install libltc (Mac) or sudo apt install libltc-dev (Linux)")
+endif()
+
 # Threads
 find_package(Threads REQUIRED)
 
@@ -212,7 +245,7 @@ else()
     message(STATUS "Install with: sudo apt install libsdl2-dev libsdl2-ttf-dev")
 endif()
 
-# --- NDI Test Pattern Generator ---
+# --- NDI Test Pattern Generator (with LTC timecode) ---
 add_executable(ndi-test-pattern
     src/tools/ndi_test_pattern.cpp
 )
@@ -226,6 +259,17 @@ target_link_libraries(ndi-test-pattern PRIVATE
 )
 if(NDI_LIBRARY_DIRS)
     target_link_directories(ndi-test-pattern PRIVATE ${NDI_LIBRARY_DIRS})
+endif()
+
+if(LTC_FOUND)
+    target_compile_definitions(ndi-test-pattern PRIVATE HAVE_LIBLTC=1)
+    target_link_libraries(ndi-test-pattern PRIVATE ${LTC_LIBRARIES})
+    if(LTC_INCLUDE_DIRS)
+        target_include_directories(ndi-test-pattern PRIVATE ${LTC_INCLUDE_DIRS})
+    endif()
+    if(LTC_LIBRARY_DIRS)
+        target_link_directories(ndi-test-pattern PRIVATE ${LTC_LIBRARY_DIRS})
+    endif()
 endif()
 
 # --- Install ---
@@ -242,5 +286,10 @@ if(AVCODEC_FOUND)
     message(STATUS "FFmpeg swscale: ${SWSCALE_VERSION}")
 else()
     message(STATUS "FFmpeg: NOT FOUND (encoding/decoding disabled)")
+endif()
+if(LTC_FOUND)
+    message(STATUS "libltc: ${LTC_LIBRARIES}")
+else()
+    message(STATUS "libltc: NOT FOUND (LTC timecode disabled)")
 endif()
 message(STATUS "")

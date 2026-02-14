@@ -146,6 +146,16 @@ bool VideoDecoder::initScaler(int width, int height, int srcPixelFormat) {
         return false;
     }
 
+    // Set full color range (0-255) — our encoder uses AVCOL_RANGE_JPEG
+    // Without this, sws defaults to limited range (16-235) causing color shift
+    int srcRange = 1;  // 1 = full range
+    int dstRange = 1;  // 1 = full range
+    const int* inv_table = sws_getCoefficients(SWS_CS_ITU709);
+    const int* table = sws_getCoefficients(SWS_CS_ITU709);
+    int brightness = 0, contrast = 1 << 16, saturation = 1 << 16;
+    sws_setColorspaceDetails(swsCtx_, inv_table, srcRange, table, dstRange,
+                             brightness, contrast, saturation);
+
     // Allocate converted frame with FFmpeg-managed aligned buffer
     convertedFrame_ = av_frame_alloc();
     if (!convertedFrame_) {

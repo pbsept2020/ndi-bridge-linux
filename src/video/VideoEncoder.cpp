@@ -96,6 +96,10 @@ bool VideoEncoder::initEncoder() {
     codecCtx_->time_base = AVRational{1, static_cast<int>(TIMESTAMP_RESOLUTION)};  // 10M ticks/sec
     codecCtx_->framerate = AVRational{config_.fps, 1};
     codecCtx_->pix_fmt = AV_PIX_FMT_YUV420P;  // x264 prefers YUV420P
+    codecCtx_->color_range = AVCOL_RANGE_JPEG;  // Full range (0-255) — NDI is full range
+    codecCtx_->colorspace = AVCOL_SPC_BT709;
+    codecCtx_->color_primaries = AVCOL_PRI_BT709;
+    codecCtx_->color_trc = AVCOL_TRC_BT709;
     codecCtx_->bit_rate = config_.bitrate;
     codecCtx_->rc_max_rate = config_.bitrate * 3 / 2;  // Peak = 1.5x average
     codecCtx_->rc_buffer_size = config_.bitrate / config_.fps;  // 1 frame buffer (match VideoToolbox)
@@ -114,6 +118,10 @@ bool VideoEncoder::initEncoder() {
     av_dict_set(&opts, "profile", config_.profile.c_str(), 0);
 
     // Additional low-latency options (match Mac's MaxFrameDelayCount=0)
+    av_dict_set(&opts, "colorprim", "bt709", 0);
+    av_dict_set(&opts, "transfer", "bt709", 0);
+    av_dict_set(&opts, "colormatrix", "bt709", 0);
+    av_dict_set(&opts, "fullrange", "on", 0);  // Force full range (0-255)
     av_dict_set(&opts, "rc-lookahead", "0", 0);
     av_dict_set(&opts, "sync-lookahead", "0", 0);
     // NOTE: Do NOT set sliced-threads=0 here — tune=zerolatency enables
