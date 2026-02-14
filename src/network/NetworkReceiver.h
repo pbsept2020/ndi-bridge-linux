@@ -111,6 +111,16 @@ public:
     NetworkReceiverStats getStats() const;
 
     /**
+     * Get video reassembler stats (fragment-level diagnostics)
+     */
+    FrameReassembler::Stats getVideoReassemblerStats() const { return videoReassembler_.getStats(); }
+
+    /**
+     * Get audio reassembler stats
+     */
+    FrameReassembler::Stats getAudioReassemblerStats() const { return audioReassembler_.getStats(); }
+
+    /**
      * Reset statistics
      */
     void resetStats();

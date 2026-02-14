@@ -40,7 +40,7 @@ int HostMode::start(std::atomic<bool>& running) {
     log.info("═══════════════════════════════════════════════════════");
     log.info("Starting HOST MODE (Sender)");
     log.successf("Target: %s:%u", config_.targetHost.c_str(), config_.targetPort);
-    log.successf("Bitrate: %d Mbps", config_.bitrateMbps);
+    log.successf("Bitrate: %d Mbps, MTU: %zu", config_.bitrateMbps, config_.mtu);
     log.info("═══════════════════════════════════════════════════════");
 
     // Step 1: Initialize NDI Receiver
@@ -104,6 +104,7 @@ int HostMode::start(std::atomic<bool>& running) {
     NetworkSenderConfig senderConfig;
     senderConfig.host = config_.targetHost;
     senderConfig.port = config_.targetPort;
+    senderConfig.mtu = config_.mtu;
 
     networkSender_ = std::make_unique<NetworkSender>(senderConfig);
 
@@ -144,10 +145,13 @@ int HostMode::start(std::atomic<bool>& running) {
             std::chrono::duration_cast<std::chrono::seconds>(now - lastStats).count() >= 5) {
             lastStats = now;
             auto stats = getStats();
-            log.debugf("Stats: video=%lu audio=%lu encoded=%lu sent=%.2f MB time=%.1fs",
+            auto senderStats = networkSender_ ? networkSender_->getStats() : NetworkSenderStats{};
+            log.debugf("Stats: video=%lu audio=%lu encoded=%lu pkts_sent=%lu eagain_drops=%lu sent=%.2fMB time=%.1fs",
                       stats.videoFramesReceived,
                       stats.audioFramesReceived,
                       stats.videoFramesEncoded,
+                      senderStats.packetsSent,
+                      senderStats.packetsDroppedEagain,
                       stats.bytesSent / (1024.0 * 1024.0),
                       stats.runTimeSeconds);
         }
@@ -157,13 +161,16 @@ int HostMode::start(std::atomic<bool>& running) {
     stop();
 
     auto finalStats = getStats();
+    auto finalSenderStats = networkSender_ ? networkSender_->getStats() : NetworkSenderStats{};
     log.success("═══════════════════════════════════════════════════════");
     log.success("HOST MODE STOPPED");
     log.successf("Duration: %.1f seconds", finalStats.runTimeSeconds);
-    log.successf("Video frames: %lu received, %lu encoded",
+    log.successf("Video: %lu received, %lu encoded",
                  finalStats.videoFramesReceived, finalStats.videoFramesEncoded);
-    log.successf("Audio frames: %lu", finalStats.audioFramesReceived);
-    log.successf("Data sent: %.2f MB", finalStats.bytesSent / (1024.0 * 1024.0));
+    log.successf("Network: %lu packets sent, %lu EAGAIN drops, %.2f MB",
+                 finalSenderStats.packetsSent, finalSenderStats.packetsDroppedEagain,
+                 finalStats.bytesSent / (1024.0 * 1024.0));
+    log.successf("Audio: %lu frames", finalStats.audioFramesReceived);
     log.success("═══════════════════════════════════════════════════════");
 
     return 0;

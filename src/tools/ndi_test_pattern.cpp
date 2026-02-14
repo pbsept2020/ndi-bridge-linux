@@ -315,7 +315,7 @@ static void printUsage(const char* prog) {
            "Bouncing green ball on dark background.\n"
            "Any stutter or jump in the ball = dropped frames.\n"
            "Flickering white square (top-left) = frames arriving.\n"
-           "LTC timecode (ch1=LTC, ch2=silence or 440Hz).\n"
+           "LTC timecode (ch1=silence or 440Hz, ch2=LTC per SMPTE convention).\n"
            "\n",
            NDI_BRIDGE_VERSION, prog);
 }
@@ -502,7 +502,7 @@ int main(int argc, char* argv[]) {
     std::vector<uint8_t> videoData(stride * height);
 
     const int sampleRate = 48000;
-    const int channels = 2;  // ch1=LTC, ch2=silence (or 440Hz)
+    const int channels = 2;  // ch1=silence (or 440Hz), ch2=LTC (SMPTE convention: last channel)
     AudioSampleCounter sampleCounter;
     sampleCounter.init(sampleRate, tcRate->fps);
 
@@ -607,16 +607,16 @@ int main(int argc, char* argv[]) {
 
                 int copyLen = std::min(ltcLen, samplesThisFrame);
                 for (int i = 0; i < copyLen; i++) {
-                    audioData[0 * samplesThisFrame + i] =
+                    audioData[(channels - 1) * samplesThisFrame + i] =
                         (static_cast<float>(ltcBuf[i]) - 128.0f) / 128.0f;
                 }
             }
 #endif
 
-            // Channel 2: 440Hz sine if requested, else silence
+            // Channel 1: 440Hz sine if requested, else silence
             if (audio440) {
                 generateSine440(audioData.data(), sampleRate, samplesThisFrame,
-                                1, channels, sinePhase);
+                                0, channels, sinePhase);
             }
 
             NDIlib_audio_frame_v2_t audioFrame = {};

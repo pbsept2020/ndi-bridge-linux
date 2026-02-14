@@ -14,6 +14,7 @@
 #include <memory>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <mutex>
 #include <queue>
 #include <thread>
@@ -118,6 +119,10 @@ private:
     void onDecodedFrame(const DecodedFrame& frame);
     void onNetworkError(const std::string& error);
 
+    // Async decode
+    void decodeLoop();
+    static constexpr size_t MAX_DECODE_QUEUE = 90; // 3 seconds at 30fps
+
     // Buffer management
     void bufferOutputLoop();
     void processBufferedFrames();
@@ -133,6 +138,13 @@ private:
     // State
     std::atomic<bool> running_{false};
     bool decoderConfigured_ = false;
+
+    // Async decode queue
+    std::queue<ReceivedVideoFrame> decodeQueue_;
+    std::mutex decodeQueueMutex_;
+    std::condition_variable decodeQueueCv_;
+    std::thread decodeThread_;
+    std::atomic<bool> decodeRunning_{false};
 
     // Buffering
     std::mutex videoBufferMutex_;
@@ -152,6 +164,12 @@ private:
     std::atomic<uint64_t> videoFramesDecoded_{0};
     std::atomic<uint64_t> videoFramesOutput_{0};
     std::atomic<uint64_t> audioFramesOutput_{0};
+
+    // Decode timing
+    std::atomic<uint64_t> totalDecodeTimeUs_{0};
+    std::atomic<uint64_t> maxDecodeTimeUs_{0};
+    std::atomic<uint64_t> decodeCount_{0};
+    std::atomic<uint64_t> videoFramesDroppedQueue_{0};
 };
 
 } // namespace ndi_bridge

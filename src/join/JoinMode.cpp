@@ -6,8 +6,10 @@
 
 #include "JoinMode.h"
 #include "../common/Logger.h"
+#include "../common/Protocol.h"
 
 #include <cstring>
+#include <chrono>
 
 namespace ndi_bridge {
 
@@ -60,6 +62,10 @@ int JoinMode::start(std::atomic<bool>& running) {
     });
 
     LOG_SUCCESS("Decoder ready (waiting for SPS/PPS)");
+
+    // Start async decode thread
+    decodeRunning_ = true;
+    decodeThread_ = std::thread(&JoinMode::decodeLoop, this);
 
     // Step 2: Start NDI sender
     log.info("Step 2/3: Starting NDI output...");
@@ -127,12 +133,23 @@ int JoinMode::start(std::atomic<bool>& running) {
             counter = 0;
             auto stats = getStats();
             auto netStats = networkReceiver_ ? networkReceiver_->getStats() : NetworkReceiverStats{};
-            log.debugf("Stats: pkts=%lu recv=%lu dropped=%lu decoded=%lu output=%lu audio=%lu time=%.1fs",
+            // Get reassembler fragment stats for drop diagnosis
+            auto videoReasmStats = networkReceiver_ ? networkReceiver_->getVideoReassemblerStats() : FrameReassembler::Stats{};
+            uint64_t avgRecv = videoReasmStats.framesDropped > 0 ? videoReasmStats.totalFragmentsReceivedBeforeDrop / videoReasmStats.framesDropped : 0;
+            uint64_t avgExpect = videoReasmStats.framesDropped > 0 ? videoReasmStats.totalFragmentsExpectedBeforeDrop / videoReasmStats.framesDropped : 0;
+            double avgCompletion = videoReasmStats.totalFragmentsExpectedBeforeDrop > 0
+                ? 100.0 * videoReasmStats.totalFragmentsReceivedBeforeDrop / videoReasmStats.totalFragmentsExpectedBeforeDrop : 0.0;
+            double decAvgMs = decodeCount_ > 0 ? (totalDecodeTimeUs_.load() / (double)decodeCount_.load()) / 1000.0 : 0.0;
+            double decMaxMs = maxDecodeTimeUs_.load() / 1000.0;
+            log.debugf("Stats: pkts=%lu recv=%lu dropped=%lu(avg %lu/%lu frags %.0f%%) decoded=%lu output=%lu qdrop=%lu decode_ms=%.1f/%.1f audio=%lu time=%.1fs",
                       netStats.packetsReceived,
                       stats.videoFramesReceived,
                       netStats.framesDropped,
+                      avgRecv, avgExpect, avgCompletion,
                       stats.videoFramesDecoded,
                       stats.videoFramesOutput,
+                      videoFramesDroppedQueue_.load(),
+                      decAvgMs, decMaxMs,
                       stats.audioFramesOutput,
                       stats.runTimeSeconds);
         }
@@ -142,13 +159,28 @@ int JoinMode::start(std::atomic<bool>& running) {
     stop();
 
     auto finalStats = getStats();
+    auto finalNetStats = networkReceiver_ ? networkReceiver_->getStats() : NetworkReceiverStats{};
+    auto finalReasmStats = networkReceiver_ ? networkReceiver_->getVideoReassemblerStats() : FrameReassembler::Stats{};
+    double finalAvgCompletion = finalReasmStats.totalFragmentsExpectedBeforeDrop > 0
+        ? 100.0 * finalReasmStats.totalFragmentsReceivedBeforeDrop / finalReasmStats.totalFragmentsExpectedBeforeDrop : 0.0;
+    double finalDecAvgMs = decodeCount_ > 0 ? (totalDecodeTimeUs_.load() / (double)decodeCount_.load()) / 1000.0 : 0.0;
+    double finalDecMaxMs = maxDecodeTimeUs_.load() / 1000.0;
     log.success("═══════════════════════════════════════════════════════");
     log.success("JOIN MODE STOPPED");
     log.successf("Duration: %.1f seconds", finalStats.runTimeSeconds);
+    log.successf("Packets: %lu received, %lu invalid",
+                 finalNetStats.packetsReceived, finalNetStats.invalidPackets);
     log.successf("Video: %lu received, %lu decoded, %lu output",
                  finalStats.videoFramesReceived,
                  finalStats.videoFramesDecoded,
                  finalStats.videoFramesOutput);
+    log.successf("Dropped: %lu frames (avg completion %.0f%%, frags %lu/%lu) qdrop=%lu",
+                 finalNetStats.framesDropped, finalAvgCompletion,
+                 finalReasmStats.totalFragmentsReceivedBeforeDrop,
+                 finalReasmStats.totalFragmentsExpectedBeforeDrop,
+                 videoFramesDroppedQueue_.load());
+    log.successf("Decode: avg=%.1fms max=%.1fms (%lu frames)",
+                 finalDecAvgMs, finalDecMaxMs, decodeCount_.load());
     log.successf("Audio: %lu received, %lu output",
                  finalStats.audioFramesReceived, finalStats.audioFramesOutput);
     log.success("═══════════════════════════════════════════════════════");
@@ -172,6 +204,15 @@ void JoinMode::stop() {
 
     if (networkReceiver_) {
         networkReceiver_->stop();
+    }
+
+    // Stop decode thread before flushing decoder
+    if (decodeRunning_) {
+        decodeRunning_ = false;
+        decodeQueueCv_.notify_all();
+        if (decodeThread_.joinable()) {
+            decodeThread_.join();
+        }
     }
 
     if (decoder_) {
@@ -213,10 +254,43 @@ JoinMode::Stats JoinMode::getStats() const {
 void JoinMode::onVideoFrame(const ReceivedVideoFrame& frame) {
     videoFramesReceived_++;
 
-    // Decode the received H.264 frame
-    if (decoder_) {
-        decoder_->decode(frame.data.data(), frame.data.size(), frame.timestamp);
+    // Push to async decode queue (non-blocking, ~1ms)
+    {
+        std::lock_guard<std::mutex> lock(decodeQueueMutex_);
+        if (decodeQueue_.size() >= MAX_DECODE_QUEUE) {
+            decodeQueue_.pop();
+            videoFramesDroppedQueue_++;
+        }
+        decodeQueue_.push(frame);
     }
+    decodeQueueCv_.notify_one();
+}
+
+void JoinMode::decodeLoop() {
+    LOG_DEBUG("Decode thread started");
+    while (decodeRunning_) {
+        ReceivedVideoFrame frame;
+        {
+            std::unique_lock<std::mutex> lock(decodeQueueMutex_);
+            decodeQueueCv_.wait(lock, [this] {
+                return !decodeQueue_.empty() || !decodeRunning_;
+            });
+            if (!decodeRunning_ && decodeQueue_.empty()) break;
+            frame = std::move(decodeQueue_.front());
+            decodeQueue_.pop();
+        }
+        if (decoder_) {
+            auto t0 = std::chrono::steady_clock::now();
+            decoder_->decode(frame.data.data(), frame.data.size(), frame.timestamp);
+            auto t1 = std::chrono::steady_clock::now();
+            uint64_t us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+            totalDecodeTimeUs_ += us;
+            decodeCount_++;
+            uint64_t prevMax = maxDecodeTimeUs_.load();
+            while (us > prevMax && !maxDecodeTimeUs_.compare_exchange_weak(prevMax, us)) {}
+        }
+    }
+    LOG_DEBUG("Decode thread stopped");
 }
 
 void JoinMode::onAudioFrame(const ReceivedAudioFrame& frame) {

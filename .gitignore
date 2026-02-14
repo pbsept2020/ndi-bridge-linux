@@ -7,3 +7,5 @@ build-mac/
 *.dylib
 *.so
 .DS_Store
+build/
+.cache/

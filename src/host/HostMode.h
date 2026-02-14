@@ -28,6 +28,7 @@ struct HostModeConfig {
     std::string targetHost = "127.0.0.1";
     uint16_t targetPort = 5990;
     int bitrateMbps = 8;                    // Video bitrate in Mbps
+    size_t mtu = 1400;                      // UDP MTU (reduce for VPN tunnels)
     bool autoSelectFirstSource = false;     // Auto-select first source
     std::string sourceName;                 // Specific source name (empty = interactive)
     std::vector<std::string> excludePatterns = {"Bridge"};  // Patterns to exclude

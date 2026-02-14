@@ -212,8 +212,11 @@ std::optional<FrameReassembler::Frame> FrameReassembler::addPacket(
         // If we had a pending frame, it's now dropped
         if (pending_.has_value() && pending_->receivedCount < pending_->fragmentCount) {
             stats_.framesDropped++;
-            Logger::instance().debugf("DROPPED frame seq=%u: got %u/%u fragments",
-                pending_->sequenceNumber, pending_->receivedCount, pending_->fragmentCount);
+            stats_.totalFragmentsReceivedBeforeDrop += pending_->receivedCount;
+            stats_.totalFragmentsExpectedBeforeDrop += pending_->fragmentCount;
+            Logger::instance().debugf("DROPPED frame seq=%u: got %u/%u fragments (%.0f%%)",
+                pending_->sequenceNumber, pending_->receivedCount, pending_->fragmentCount,
+                100.0 * pending_->receivedCount / pending_->fragmentCount);
         }
 
         // Initialize new pending frame

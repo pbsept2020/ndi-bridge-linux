@@ -55,6 +55,7 @@ struct Config {
     std::string targetHost = "127.0.0.1";
     uint16_t targetPort = 5990;
     int bitrate = 8;            // Mbps
+    size_t mtu = 1400;          // UDP MTU
 
     // Join mode options
     std::string outputName = "NDI Bridge";
@@ -83,6 +84,7 @@ void printUsage(const char* programName) {
         "  --auto                Auto-select first available source\n"
         "  --target <ip:port>    Target address (default: 127.0.0.1:5990)\n"
         "  --bitrate <mbps>      Video bitrate in Mbps (default: 8)\n"
+        "  --mtu <bytes>         UDP MTU size (default: 1400, use 1200 for VPN)\n"
         "\n"
         "Join mode options:\n"
         "  --name <name>         NDI output source name (default: NDI Bridge)\n"
@@ -131,6 +133,8 @@ Config parseArgs(int argc, char* argv[]) {
             }
         } else if (arg == "--bitrate" && i + 1 < argc) {
             config.bitrate = std::stoi(argv[++i]);
+        } else if (arg == "--mtu" && i + 1 < argc) {
+            config.mtu = static_cast<size_t>(std::stoi(argv[++i]));
         }
         // Join options
         else if (arg == "--name" && i + 1 < argc) {
@@ -212,6 +216,7 @@ int runHost(const Config& config) {
     hostConfig.targetHost = config.targetHost;
     hostConfig.targetPort = config.targetPort;
     hostConfig.bitrateMbps = config.bitrate;
+    hostConfig.mtu = config.mtu;
     hostConfig.autoSelectFirstSource = config.autoSelect;
     hostConfig.sourceName = config.source;
 

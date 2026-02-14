@@ -231,6 +231,10 @@ bool NetworkSender::sendPacket(const uint8_t* data, size_t size) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             // Non-blocking socket: kernel buffer full — drop packet (real-time behavior)
             // This matches Mac's .idempotent send completion (fire-and-forget)
+            {
+                std::lock_guard<std::mutex> lock(statsMutex_);
+                stats_.packetsDroppedEagain++;
+            }
             return true;
         }
         Logger::instance().errorf("Send error: %s", strerror(errno));

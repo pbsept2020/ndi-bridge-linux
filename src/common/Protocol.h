@@ -231,6 +231,8 @@ public:
         uint64_t framesDropped = 0;
         uint64_t packetsReceived = 0;
         uint64_t packetsDuplicate = 0;
+        uint64_t totalFragmentsReceivedBeforeDrop = 0;
+        uint64_t totalFragmentsExpectedBeforeDrop = 0;
     };
     Stats getStats() const { return stats_; }
 

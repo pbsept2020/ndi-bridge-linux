@@ -34,6 +34,7 @@ struct NetworkSenderStats {
     uint64_t packetsSent = 0;
     uint64_t framesSent = 0;
     uint64_t sendErrors = 0;
+    uint64_t packetsDroppedEagain = 0;
 };
 
 /**
