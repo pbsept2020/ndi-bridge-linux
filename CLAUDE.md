@@ -444,9 +444,17 @@ Options `--ball-color` : green (défaut), red, blue, yellow, cyan, magenta, whit
   - Test longue durée (93 min) : 142 671 frames, dropped=10 (0.007%), qdrop=637 (0.45%)
   - Pré-requis : chrony des deux côtés (biais NTP < 2ms)
 
+- **Round-trip NVENC validé** (15 fév 2026) : Mac → Vmix1-frankfurt (g6.xlarge, NVIDIA L4) → Mac
+  - Encodeur retour : **h264_nvenc** (hardware GPU), confirmé dans les logs
+  - **qdrop=0** (vs 47% sur t3.medium x264) — amélioration majeure
+  - dropped=6/3051 (0.2%), decode_ms=10.1avg, latency_ms=424ms stable
+  - FPS retour : ~17fps (source webcam à 21fps, 4fps perdus dans la queue d'encodage)
+  - Delta TC round-trip : 22 frames = **880ms** (cohérent avec RTT SpeedFusion 221ms × 2 + encode/decode)
+  - Bitrate : 4 Mbps, MTU 1200 (réduit pour éviter les artefacts UDP sur internet public)
+
 ### Ce qui bloque
-- **sudo obligatoire pour join Mac via en7/SpeedFusion** : bug NECP macOS, les processus non-root ne reçoivent pas l'UDP via l'interface secondaire en7 (AX88179A). Contournement : `sudo ./build-mac/ndi-bridge join`. Voir section dédiée ci-dessous.
-- **Performance retour EC2→Mac** : qdrop élevé (193/732), decode_ms=53.7/124.9 — le décodeur Mac n'arrive pas à suivre, probablement lié à la latence SpeedFusion (~200ms) qui cause de l'accumulation. Le hwaccel decode (v2.0) devrait améliorer ça — à retester
+- **sudo obligatoire pour join Mac via en7/SpeedFusion** : bug NECP macOS, les processus non-root ne reçoivent pas l'UDP via l'interface secondaire en7 (AX88179A). Contournement : `sudo ./build-mac/ndi-bridge-x join`. Voir section dédiée ci-dessous.
+- **FPS retour Vmix1 = 17fps au lieu de 25fps** : la source NDI sur Vmix1 (webcam bridgée) est à 21fps, et ~4fps sont droppés par la queue d'encodage host. À investiguer côté Vmix1 (stats host)
 
 ### Infra EC2 Frankfurt (eu-central-1)
 
@@ -537,30 +545,47 @@ Utiliser deploy-vm.sh (mis à jour pour EC2) :
 ### Commandes de test validées (15 fév 2026)
 
 ```bash
+# === Via Vmix1-frankfurt (Windows g6.xlarge, NVENC) — RECOMMANDÉ ===
+
+# Sur Mac — host vers Vmix1 (IP publique)
+./build-mac/ndi-bridge-x host --source "Test Pattern LTC" --target 63.181.214.196:5990 -v
+
+# Sur Vmix1 (PowerShell) — join (reçoit du Mac)
+.\build\Release\ndi-bridge-x.exe join --name "Pierre Frankfurt" --port 5990 -v
+
+# Sur Vmix1 (PowerShell) — host retour NVENC vers Mac (IP LAN via SpeedFusion)
+.\build\Release\ndi-bridge-x.exe host --source "Pierre Frankfurt" --target 192.168.1.9:5991 -v --bitrate 4 --mtu 1200
+
+# Sur Mac — join retour (sudo obligatoire pour NECP/en7)
+sudo ./build-mac/ndi-bridge-x join --name "Pierre Frankfurt Round-Trip" --port 5991 -v
+
+# === Via ltc-ndi-test (Linux t3.medium, x264 software) ===
+
 # Sur EC2 — lancer le test pattern
-~/ndi-bridge-linux/build/ndi-test-pattern --name "EC2 Ball" --resolution 1920x1080 --fps 30
+~/ndi-bridge-linux/build/ndi-test-pattern --name "EC2 Ball" --resolution 1920x1080 --fps 25
 
 # Sur EC2 — lancer le join (reçoit du Mac)
-~/ndi-bridge-linux/build/ndi-bridge join --name "Test Pattern EC2" --port 5990 -v
+~/ndi-bridge-linux/build/ndi-bridge-x join --name "Test Pattern EC2" --port 5990 -v
 
-# Sur Mac — lancer le host vers EC2 (IP publique EC2, OK car EC2 a un port ouvert)
-./build-mac/ndi-bridge host --source "Test Pattern LTC" --target 54.93.225.67:5990 -v
+# Sur Mac — lancer le host vers EC2 (IP publique EC2)
+./build-mac/ndi-bridge-x host --source "Test Pattern LTC" --target 54.93.225.67:5990 -v
 
-# Sur EC2 — lancer le host retour vers Mac (IP LAN via SpeedFusion !)
-~/ndi-bridge-linux/build/ndi-bridge host --source "EC2 Ball" --target 192.168.1.9:5991 -v
+# Sur EC2 — lancer le host retour vers Mac (IP LAN via SpeedFusion)
+~/ndi-bridge-linux/build/ndi-bridge-x host --source "EC2 Ball" --target 192.168.1.9:5991 -v
 
 # Sur Mac — lancer le join retour (port 5991)
-./build-mac/ndi-bridge join --name "EC2 Ball" --port 5991 -v
+sudo ./build-mac/ndi-bridge-x join --name "EC2 Ball" --port 5991 -v
 ```
 
 **IMPORTANT pour les targets :**
-- Mac → EC2 : utiliser IP publique EC2 (54.93.225.67) — le security group autorise le port
-- EC2 → Mac : utiliser IP LAN Peplink (192.168.1.9) via SpeedFusion — PAS l'IP publique (NAT bloque)
+- Mac → EC2/Vmix1 : utiliser IP publique — le security group autorise le port
+- EC2/Vmix1 → Mac : utiliser IP LAN Peplink (192.168.1.9) via SpeedFusion — PAS l'IP publique (NAT bloque)
+- Vmix1 retour : **--bitrate 4 --mtu 1200** pour éviter les artefacts UDP sur internet public
 
 ### Prochaines étapes
-1. **Compiler et tester sur Vmix1-frankfurt** (Windows g6.xlarge NVIDIA L4) — installer VS Build Tools, CMake, FFmpeg (avec NVENC + AV1), NDI SDK Windows
-2. **Tester round-trip via Vmix1** — Mac→Vmix1 (join+host NVENC)→Mac, mesurer qdrop et latence
-3. **Retester performance retour EC2→Mac** — avec hwaccel decode + async encode (v2.0), les qdrop devraient baisser
+1. ~~Compiler et tester sur Vmix1-frankfurt~~ — **FAIT** (v2.1, NVENC validé, qdrop=0)
+2. ~~Tester round-trip via Vmix1~~ — **FAIT** (880ms round-trip, 0% qdrop, 424ms latence one-way)
+3. **Investiguer 17fps retour** — la queue d'encodage host Vmix1 droppe ~4fps, vérifier si c'est la queue bornée à 3 frames ou un problème NDI recv
 4. **Calibration NTP optionnelle** — échange ping/pong au démarrage pour soustraire l'offset NTP résiduel du delta sendTimestamp
 5. **Support AV1** (futur) — le L4 a `av1_nvenc` hardware. Nécessite : champ codec dans le header protocole (actuellement implicitement H.264), décodeur AV1 côté join (libdav1d ou VideoToolbox AV1 sur macOS 14+), format OBU au lieu d'Annex-B. Gain attendu : meilleure qualité à débit égal ou débit réduit sur le lien WAN
 
