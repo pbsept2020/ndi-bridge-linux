@@ -239,13 +239,17 @@ bool NetworkSender::sendPacket(const uint8_t* data, size_t size) {
             }
             return true;
         }
-        Logger::instance().errorf("Send error: %s", strerror(errno));
         {
             std::lock_guard<std::mutex> lock(statsMutex_);
             stats_.sendErrors++;
-        }
-        if (onError_) {
-            onError_(std::string("Send error: ") + strerror(errno));
+            // Rate-limit error logging: only log once per second
+            static auto lastErrorLog = std::chrono::steady_clock::time_point{};
+            auto now = std::chrono::steady_clock::now();
+            if (now - lastErrorLog >= std::chrono::seconds(1)) {
+                lastErrorLog = now;
+                Logger::instance().errorf("Send error: %s (total: %lu)",
+                                          strerror(errno), stats_.sendErrors);
+            }
         }
         return false;
     }
