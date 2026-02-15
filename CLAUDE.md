@@ -348,7 +348,7 @@ au lieu de parser et envoyer chaque NAL unit séparément.
 units individuellement au lieu du frame complet.
 
 ## Version
-Actuelle : v2.1 (15 fév 2026)
+Actuelle : v2.2 (15 fév 2026)
 
 
 La version est définie dans `src/common/Version.h` (macro `NDI_BRIDGE_VERSION`).
@@ -418,9 +418,10 @@ Options `--ball-color` : green (défaut), red, blue, yellow, cyan, magenta, whit
 - **Validé cross-machine** (15 fév 2026) : bille verte Mac + bille rouge EC2 via bridge,
   delta TC = 3 frames = ~120ms one-way (cohérent avec SpeedFusion RTT 225ms / 2)
 
-## État actuel (v2.1 — 15 fév 2026)
+## État actuel (v2.2 — 15 fév 2026)
 
 ### Ce qui marche
+- **Web UI intégrée** (v2.2) : `ndi-bridge-x --web-ui` lance un serveur HTTP avec contrôle graphique. Source discovery, start/stop multi-pipeline (host + join), stats live. Pattern calqué sur `tc_webcontrol.h`. Fichiers : `src/web/BridgeManager.h/.cpp`, `src/web/BridgeWebControl.h`
 - **Build cross-platform** : Mac (build-mac/), Linux (build/) et Windows depuis le même codebase C++
 - **Port Windows** (v2.1) : `Platform.h` abstrait sockets (WinSock), byte-swap (MSVC), wall clock (GetSystemTimePreciseAsFileTime), non-blocking mode (ioctlsocket). CMake ajoute ws2_32 et cherche le NDI SDK Windows
 - **NVENC hardware encoding** (v2.1) : sur Windows avec GPU NVIDIA, `h264_nvenc` (preset p4, tune ll, zerolatency) avec fallback `h264_qsv` (Intel) puis `libx264` (software)
@@ -541,6 +542,33 @@ Utiliser deploy-vm.sh (mis à jour pour EC2) :
 - Installe libltc-dev
 - Tue les anciens processus
 - Copie, build, relance test-pattern + join
+
+### Web UI (v2.2)
+
+```bash
+# Lancer la Web UI (ouvre Safari automatiquement sur Mac)
+./build-mac/ndi-bridge-x --web-ui
+
+# Avec port personnalisé
+./build-mac/ndi-bridge-x --web-ui --web-port 9090
+
+# Avec logs détaillés
+./build-mac/ndi-bridge-x --web-ui -v
+```
+
+La Web UI permet de :
+- Voir et sélectionner les sources NDI découvertes
+- Configurer target IP, port, bitrate, MTU
+- Démarrer/arrêter des bridges host et join
+- Voir les stats live (video recv/encoded/dropped, fps, bytes sent, etc.)
+- Gérer plusieurs bridges simultanément
+
+API REST disponible :
+- `GET /api/sources` — liste les sources NDI
+- `GET /api/pipelines` — statut des bridges actifs
+- `POST /api/host/add` — démarrer un host (params: source, target, port, bitrate, mtu)
+- `POST /api/join/add` — démarrer un join (params: name, port)
+- `POST /api/stop/:id` — arrêter un bridge
 
 ### Commandes de test validées (15 fév 2026)
 

@@ -96,6 +96,7 @@ set(COMMON_SOURCES
     src/ndi/NDISender.cpp
     src/host/HostMode.cpp
     src/join/JoinMode.cpp
+    src/web/BridgeManager.cpp
 )
 
 # Add FFmpeg-dependent sources

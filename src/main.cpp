@@ -22,12 +22,16 @@
 #ifdef _WIN32
 #include "common/Platform.h"
 #include <windows.h>
+#else
+#include <unistd.h>
 #endif
 
 #include "common/Logger.h"
 #include "common/Protocol.h"
 #include "host/HostMode.h"
 #include "join/JoinMode.h"
+#include "web/BridgeManager.h"
+#include "web/BridgeWebControl.h"
 
 // NDI SDK
 #include <Processing.NDI.Lib.h>
@@ -61,7 +65,7 @@ BOOL WINAPI consoleCtrlHandler(DWORD ctrlType) {
 
 // Command-line argument parser
 struct Config {
-    enum class Mode { None, Discover, Host, Join };
+    enum class Mode { None, Discover, Host, Join, WebUI };
 
     Mode mode = Mode::None;
 
@@ -78,9 +82,13 @@ struct Config {
     uint16_t listenPort = 5990;
     int bufferMs = 0;           // Buffer delay in ms
 
+    // Web UI options
+    int webPort = 8080;
+
     // Global options
     bool verbose = false;
     bool help = false;
+    bool clean = false;        // Kill orphan processes before starting
 };
 
 void printUsage(const char* programName) {
@@ -94,6 +102,7 @@ void printUsage(const char* programName) {
         "  discover              Discover NDI sources on the network\n"
         "  host                  Capture NDI source and stream over UDP\n"
         "  join                  Receive UDP stream and output as NDI\n"
+        "  --web-ui              Launch web control interface\n"
         "\n"
         "Host mode options:\n"
         "  --source <name>       NDI source name to capture\n"
@@ -107,6 +116,10 @@ void printUsage(const char* programName) {
         "  --port <port>         UDP listen port (default: 5990)\n"
         "  --buffer <ms>         Playback buffer delay in ms (default: 0)\n"
         "\n"
+        "Web UI options:\n"
+        "  --web-port <port>     HTTP port for web UI (default: 8080)\n"
+        "  --clean               Kill orphan ndi-bridge-x processes before starting\n"
+        "\n"
         "Global options:\n"
         "  -v, --verbose         Enable debug output\n"
         "  -h, --help            Show this help message\n"
@@ -116,6 +129,8 @@ void printUsage(const char* programName) {
         "  " << programName << " host --auto\n"
         "  " << programName << " host --source 'OBS (Camera)' --target 192.168.1.100:5990\n"
         "  " << programName << " join --name 'Remote Camera' --port 5990\n"
+        "  " << programName << " --web-ui\n"
+        "  " << programName << " --web-ui --web-port 9090\n"
         "\n";
 }
 
@@ -132,6 +147,10 @@ Config parseArgs(int argc, char* argv[]) {
             config.mode = Config::Mode::Host;
         } else if (arg == "join") {
             config.mode = Config::Mode::Join;
+        } else if (arg == "--web-ui") {
+            config.mode = Config::Mode::WebUI;
+        } else if (arg == "--web-port" && i + 1 < argc) {
+            config.webPort = std::stoi(argv[++i]);
         }
         // Host options
         else if (arg == "--source" && i + 1 < argc) {
@@ -159,6 +178,10 @@ Config parseArgs(int argc, char* argv[]) {
             config.listenPort = static_cast<uint16_t>(std::stoi(argv[++i]));
         } else if (arg == "--buffer" && i + 1 < argc) {
             config.bufferMs = std::stoi(argv[++i]);
+        }
+        // Global options
+        else if (arg == "--clean") {
+            config.clean = true;
         }
         // Global options
         else if (arg == "-v" || arg == "--verbose") {
@@ -241,6 +264,84 @@ int runHost(const Config& config) {
     return host.start(g_running);
 }
 
+// Kill orphan ndi-bridge-x processes (same binary, different PID)
+void cleanOrphans() {
+    auto& log = Logger::instance();
+#ifdef _WIN32
+    DWORD myPid = GetCurrentProcessId();
+    log.infof("Cleaning orphan ndi-bridge-x processes (my PID: %lu)...", myPid);
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd),
+        "powershell -Command \"Get-Process ndi-bridge-x -ErrorAction SilentlyContinue "
+        "| Where-Object { $_.Id -ne %lu } "
+        "| ForEach-Object { Write-Host \\\"  killed PID $($_.Id)\\\"; Stop-Process -Force $_ }\" 2>nul",
+        myPid);
+    system(cmd);
+#else
+    pid_t myPid = getpid();
+    log.infof("Cleaning orphan ndi-bridge-x processes (my PID: %d)...", (int)myPid);
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd),
+        "for pid in $(pgrep -f ndi-bridge-x 2>/dev/null); do "
+        "[ \"$pid\" != \"%d\" ] && kill -9 \"$pid\" 2>/dev/null && echo \"  killed PID $pid\"; "
+        "done", (int)myPid);
+    system(cmd);
+#endif
+    log.success("Orphan cleanup done");
+}
+
+// Web UI mode: embedded HTTP server with multi-pipeline control
+int runWebUI(const Config& config) {
+    using namespace ndi_bridge;
+
+    auto& log = Logger::instance();
+
+    // Detect if we need sudo (macOS non-root)
+    bool needsSudo = false;
+#ifdef __APPLE__
+    if (getuid() != 0) {
+        needsSudo = true;
+        LOG_INFO("[WARNING] Running without root privileges on macOS");
+        LOG_INFO("[WARNING] Join via en7/SpeedFusion requires sudo. Relaunch with:");
+        LOG_INFO("[WARNING]   sudo ./build-mac/ndi-bridge-x --web-ui");
+    }
+#endif
+
+    log.info("Starting Web UI mode...");
+
+    BridgeManager manager;
+    BridgeWebControl web(&manager, config.webPort, needsSudo);
+
+    if (!web.start()) {
+        LOG_ERROR("Failed to start web server");
+        return 1;
+    }
+
+    log.successf("Web UI available at %s", web.url().c_str());
+    log.info("Press Ctrl+C to stop...");
+
+    // Auto-open browser
+#ifdef __APPLE__
+    std::string openCmd = "open " + web.url();
+    system(openCmd.c_str());
+#elif defined(_WIN32)
+    std::string openCmd = "start \"\" \"" + web.url() + "\"";
+    system(openCmd.c_str());
+#endif
+
+    // Main loop
+    while (g_running) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+
+    // Cleanup
+    log.info("Shutting down web UI...");
+    manager.stopAll();
+    web.stop();
+
+    return 0;
+}
+
 // Join mode: receive stream and output NDI
 int runJoin(const Config& config) {
     // Configure join mode
@@ -283,6 +384,11 @@ int main(int argc, char* argv[]) {
     // Show version
     Logger::instance().successf("NDI Bridge %s (built %s)", BUILD_VERSION, BUILD_DATE);
 
+    // Clean orphan processes if requested
+    if (config.clean) {
+        cleanOrphans();
+    }
+
     // Initialize NDI
     if (!initNDI()) {
         return 1;
@@ -299,6 +405,9 @@ int main(int argc, char* argv[]) {
             break;
         case Config::Mode::Join:
             result = runJoin(config);
+            break;
+        case Config::Mode::WebUI:
+            result = runWebUI(config);
             break;
         default:
             LOG_ERROR("Invalid mode");
