@@ -2,7 +2,11 @@
 #include <iostream>
 #include <iomanip>
 #include <cstdio>
+#ifdef _WIN32
+#include <io.h>
+#else
 #include <unistd.h>
+#endif
 
 namespace ndi_bridge {
 
@@ -15,7 +19,11 @@ Logger::Logger()
     : startTime_(std::chrono::steady_clock::now())
 {
     // Auto-detect if we're in a terminal
+#ifdef _WIN32
+    colored_ = _isatty(_fileno(stdout));
+#else
     colored_ = isatty(STDOUT_FILENO);
+#endif
 }
 
 void Logger::setVerbose(bool verbose) {

@@ -143,6 +143,7 @@ endif()
 
 if(MSVC)
     target_compile_options(ndi_bridge_common PRIVATE /W3)
+    target_compile_definitions(ndi_bridge_common PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
 else()
     target_compile_options(ndi_bridge_common PRIVATE -Wall -Wextra -Wpedantic)
 endif()
@@ -259,6 +260,8 @@ else()
 endif()
 
 # --- NDI Test Pattern Generator (with LTC timecode) ---
+# Web control uses POSIX sockets — skip on Windows for now
+if(NOT WIN32)
 add_executable(ndi-test-pattern
     src/tools/ndi_test_pattern.cpp
 )
@@ -284,6 +287,7 @@ if(LTC_FOUND)
         target_link_directories(ndi-test-pattern PRIVATE ${LTC_LIBRARY_DIRS})
     endif()
 endif()
+endif() # NOT WIN32
 
 # --- Install ---
 install(TARGETS ndi-bridge-x RUNTIME DESTINATION bin)

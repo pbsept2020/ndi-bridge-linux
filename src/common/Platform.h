@@ -11,7 +11,11 @@
  */
 
 #ifdef _WIN32
-    // Windows
+    // Windows — NOMINMAX must come before any Windows header to prevent
+    // min/max macros from clashing with std::min/std::max
+    #ifndef NOMINMAX
+        #define NOMINMAX
+    #endif
     #ifndef WIN32_LEAN_AND_MEAN
     #define WIN32_LEAN_AND_MEAN
     #endif

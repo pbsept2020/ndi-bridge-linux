@@ -24,11 +24,15 @@
 #include <thread>
 #include <atomic>
 
+#ifdef _WIN32
+#include "../common/Platform.h"
+#else
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <poll.h>
+#endif
 
 // ── Shared settings between web control and main loop ───────────────
 

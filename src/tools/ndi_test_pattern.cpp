@@ -30,7 +30,9 @@
 
 #include "common/Version.h"
 #include "tools/tc_font.h"
+#ifndef _WIN32
 #include "tools/tc_webcontrol.h"
+#endif
 
 #ifdef HAVE_LIBLTC
 #include <ltc.h>
