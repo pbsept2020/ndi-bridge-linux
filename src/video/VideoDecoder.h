@@ -15,6 +15,7 @@
 
 // Forward declarations for FFmpeg types
 struct AVCodecContext;
+struct AVBufferRef;
 struct AVFrame;
 struct AVPacket;
 struct SwsContext;
@@ -166,10 +167,16 @@ private:
 
     // FFmpeg contexts
     AVCodecContext* codecCtx_ = nullptr;
+    AVBufferRef* hwDeviceCtx_ = nullptr;
     AVFrame* frame_ = nullptr;
+    AVFrame* swFrame_ = nullptr;        // For GPU→CPU transfer (hwaccel)
     AVFrame* convertedFrame_ = nullptr;
     AVPacket* packet_ = nullptr;
     SwsContext* swsCtx_ = nullptr;
+    bool hwAccelActive_ = false;
+
+    // Reusable output frame (avoids per-frame allocation)
+    DecodedFrame outputDecodedFrame_;
 
     // Callbacks
     OnDecodedFrame onDecodedFrame_;

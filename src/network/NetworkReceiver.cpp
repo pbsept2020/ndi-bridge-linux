@@ -158,12 +158,13 @@ void NetworkReceiver::receiveLoop() {
         }
 
         if (received > 0) {
-            processPacket(buffer.data(), static_cast<size_t>(received));
+            uint64_t recvNs = Protocol::wallClockNs();
+            processPacket(buffer.data(), static_cast<size_t>(received), recvNs);
         }
     }
 }
 
-void NetworkReceiver::processPacket(const uint8_t* data, size_t size) {
+void NetworkReceiver::processPacket(const uint8_t* data, size_t size, uint64_t recvTimestampNs) {
     {
         std::lock_guard<std::mutex> lock(statsMutex_);
         stats_.packetsReceived++;
@@ -182,6 +183,14 @@ void NetworkReceiver::processPacket(const uint8_t* data, size_t size) {
     }
 
     const PacketHeader& header = *headerOpt;
+
+    // Measure one-way latency on first fragment of each frame
+    if (header.sendTimestamp > 0 && header.fragmentIndex == 0) {
+        int64_t deltaMs = static_cast<int64_t>((recvTimestampNs - header.sendTimestamp) / 1000000);
+        std::lock_guard<std::mutex> lock(statsMutex_);
+        stats_.latencySumMs += deltaMs;
+        stats_.latencyCount++;
+    }
 
     // Validate header
     if (!Protocol::isValid(header)) {

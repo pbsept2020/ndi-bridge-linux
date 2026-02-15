@@ -124,6 +124,8 @@ void NDISender::stop() {
     running_ = false;
 
     if (sender_) {
+        // Flush async video send before destroying
+        NDIlib_send_send_video_async_v2(static_cast<NDIlib_send_instance_t>(sender_), nullptr);
         NDIlib_send_destroy(static_cast<NDIlib_send_instance_t>(sender_));
         sender_ = nullptr;
     }
@@ -168,8 +170,24 @@ bool NDISender::sendVideo(const uint8_t* data, int width, int height, int stride
             break;
     }
 
-    // Send the frame
-    NDIlib_send_send_video_v2(static_cast<NDIlib_send_instance_t>(sender_), &videoFrame);
+    // Copy data to our owned buffer (NDI async keeps reference until next call)
+    auto& buf = asyncVideoBuf_[currentBuf_];
+    size_t dataSize;
+    if (videoFrame.FourCC == NDIlib_FourCC_video_type_BGRA) {
+        dataSize = static_cast<size_t>(stride) * height;
+    } else if (videoFrame.FourCC == NDIlib_FourCC_video_type_UYVY) {
+        dataSize = static_cast<size_t>(stride) * height;
+    } else {
+        // I420: Y + U + V
+        dataSize = static_cast<size_t>(width) * height * 3 / 2;
+    }
+    buf.resize(dataSize);
+    std::memcpy(buf.data(), data, dataSize);
+    videoFrame.p_data = buf.data();
+
+    // Async send — non-blocking, NDI releases previous buffer
+    NDIlib_send_send_video_async_v2(static_cast<NDIlib_send_instance_t>(sender_), &videoFrame);
+    currentBuf_ = 1 - currentBuf_;  // swap buffer
 
     stats_.videoFramesSent++;
     return true;

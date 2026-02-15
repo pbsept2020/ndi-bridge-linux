@@ -6,6 +6,9 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/imgutils.h>
 #include <libswscale/swscale.h>
+#ifdef __APPLE__
+#include <libavutil/hwcontext.h>
+#endif
 }
 
 namespace ndi_bridge {
@@ -58,6 +61,20 @@ bool VideoDecoder::configure(const VideoDecoderConfig& config) {
     return true;
 }
 
+// Static callback for hwaccel pixel format negotiation
+#ifdef __APPLE__
+static enum AVPixelFormat getHwFormat(AVCodecContext* /*ctx*/,
+                                       const enum AVPixelFormat* pix_fmts) {
+    for (const enum AVPixelFormat* p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
+        if (*p == AV_PIX_FMT_VIDEOTOOLBOX) {
+            return AV_PIX_FMT_VIDEOTOOLBOX;
+        }
+    }
+    // Fallback: let FFmpeg choose software format
+    return pix_fmts[0];
+}
+#endif
+
 bool VideoDecoder::initDecoder() {
     // Find H.264 decoder
     const AVCodec* codec = avcodec_find_decoder(AV_CODEC_ID_H264);
@@ -67,8 +84,6 @@ bool VideoDecoder::initDecoder() {
         return false;
     }
 
-    Logger::instance().infof("Using decoder: %s", codec->name);
-
     // Allocate codec context
     codecCtx_ = avcodec_alloc_context3(codec);
     if (!codecCtx_) {
@@ -76,13 +91,35 @@ bool VideoDecoder::initDecoder() {
         return false;
     }
 
-    // Configure for lowest-latency decoding (match Mac synchronous VTDecompression)
-    // thread_count=1: FFmpeg's multi-threaded H264 uses frame-level parallelism
-    // which buffers N-1 frames. Single-thread = zero buffering, decode-on-demand.
-    // Mac achieves this with VTDecompressionSessionWaitForAsynchronousFrames().
-    codecCtx_->thread_count = 1;
-    codecCtx_->flags |= AV_CODEC_FLAG_LOW_DELAY;
-    codecCtx_->flags2 |= AV_CODEC_FLAG2_FAST;
+    // Try VideoToolbox hardware acceleration on macOS
+#ifdef __APPLE__
+    if (config_.useHardwareAccel) {
+        int ret = av_hwdevice_ctx_create(&hwDeviceCtx_, AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+                                          nullptr, nullptr, 0);
+        if (ret >= 0) {
+            codecCtx_->hw_device_ctx = av_buffer_ref(hwDeviceCtx_);
+            codecCtx_->get_format = getHwFormat;
+            hwAccelActive_ = true;
+            Logger::instance().infof("Using decoder: %s (VideoToolbox hwaccel)", codec->name);
+        } else {
+            char errbuf[256];
+            av_strerror(ret, errbuf, sizeof(errbuf));
+            Logger::instance().infof("WARN: VideoToolbox init failed (%s), falling back to software", errbuf);
+            hwAccelActive_ = false;
+        }
+    }
+#endif
+
+    if (hwAccelActive_) {
+        // With hwaccel, GPU handles decoding — no need for CPU thread constraints
+        codecCtx_->flags2 |= AV_CODEC_FLAG2_FAST;
+    } else {
+        // Software decoding: single-thread for zero frame buffering (lowest latency)
+        codecCtx_->thread_count = 1;
+        codecCtx_->flags |= AV_CODEC_FLAG_LOW_DELAY;
+        codecCtx_->flags2 |= AV_CODEC_FLAG2_FAST;
+        Logger::instance().infof("Using decoder: %s", codec->name);
+    }
 
     // Open codec
     int ret = avcodec_open2(codecCtx_, codec, nullptr);
@@ -99,6 +136,15 @@ bool VideoDecoder::initDecoder() {
     if (!frame_) {
         LOG_ERROR("Failed to allocate frame");
         return false;
+    }
+
+    // Allocate transfer frame for GPU→CPU copy (hwaccel)
+    if (hwAccelActive_) {
+        swFrame_ = av_frame_alloc();
+        if (!swFrame_) {
+            LOG_ERROR("Failed to allocate sw transfer frame");
+            return false;
+        }
     }
 
     // Allocate packet for input
@@ -188,9 +234,19 @@ void VideoDecoder::cleanup() {
         codecCtx_ = nullptr;
     }
 
+    if (hwDeviceCtx_) {
+        av_buffer_unref(&hwDeviceCtx_);
+        hwDeviceCtx_ = nullptr;
+    }
+
     if (frame_) {
         av_frame_free(&frame_);
         frame_ = nullptr;
+    }
+
+    if (swFrame_) {
+        av_frame_free(&swFrame_);
+        swFrame_ = nullptr;
     }
 
     if (convertedFrame_) {
@@ -210,10 +266,13 @@ void VideoDecoder::cleanup() {
 
     configured_ = false;
     decoderReady_ = false;
+    hwAccelActive_ = false;
     width_ = 0;
     height_ = 0;
     sps_.clear();
     pps_.clear();
+    outputDecodedFrame_.data.clear();
+    outputDecodedFrame_.data.shrink_to_fit();
     stats_ = Stats{};
 }
 
@@ -466,27 +525,44 @@ bool VideoDecoder::decodeNALUnit(const NALUnit& nal, uint64_t timestamp) {
 }
 
 void VideoDecoder::processDecodedFrame(AVFrame* frame, uint64_t timestamp) {
+    // If frame is on GPU (hwaccel), transfer to CPU
+    AVFrame* cpuFrame = frame;
+#ifdef __APPLE__
+    if (hwAccelActive_ && frame->format == AV_PIX_FMT_VIDEOTOOLBOX) {
+        av_frame_unref(swFrame_);
+        int ret = av_hwframe_transfer_data(swFrame_, frame, 0);
+        if (ret < 0) {
+            char errbuf[256];
+            av_strerror(ret, errbuf, sizeof(errbuf));
+            Logger::instance().errorf("GPU→CPU transfer failed: %s", errbuf);
+            stats_.decodeErrors++;
+            return;
+        }
+        swFrame_->pts = frame->pts;
+        cpuFrame = swFrame_;
+    }
+#endif
+
     // Diagnostic log for first 5 frames
     if (stats_.framesDecoded < 5) {
-        // Check raw YUV data
-        uint8_t y0 = frame->data[0] ? frame->data[0][0] : 0;
-        uint8_t u0 = frame->data[1] ? frame->data[1][0] : 0;
-        uint8_t v0 = frame->data[2] ? frame->data[2][0] : 0;
-        Logger::instance().debugf("Decoded[%lu]: fmt=%s linesize=[%d,%d,%d] %dx%d Y[0]=%d U[0]=%d V[0]=%d",
+        uint8_t y0 = cpuFrame->data[0] ? cpuFrame->data[0][0] : 0;
+        uint8_t u0 = cpuFrame->data[1] ? cpuFrame->data[1][0] : 0;
+        uint8_t v0 = cpuFrame->data[2] ? cpuFrame->data[2][0] : 0;
+        Logger::instance().debugf("Decoded[%lu]: fmt=%s %dx%d Y[0]=%d U[0]=%d V[0]=%d%s",
             stats_.framesDecoded,
-            av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format)),
-            frame->linesize[0], frame->linesize[1], frame->linesize[2],
-            frame->width, frame->height, y0, u0, v0);
+            av_get_pix_fmt_name(static_cast<AVPixelFormat>(cpuFrame->format)),
+            cpuFrame->width, cpuFrame->height, y0, u0, v0,
+            hwAccelActive_ ? " (hwaccel)" : "");
     }
 
     // Update dimensions if changed
-    if (width_ != frame->width || height_ != frame->height) {
-        width_ = frame->width;
-        height_ = frame->height;
+    if (width_ != cpuFrame->width || height_ != cpuFrame->height) {
+        width_ = cpuFrame->width;
+        height_ = cpuFrame->height;
         Logger::instance().infof("Video dimensions: %dx%d", width_, height_);
 
         // Reinitialize scaler for new dimensions, using actual frame pixel format
-        if (!initScaler(width_, height_, frame->format)) {
+        if (!initScaler(width_, height_, cpuFrame->format)) {
             LOG_ERROR("Failed to initialize scaler for new dimensions");
             return;
         }
@@ -495,68 +571,52 @@ void VideoDecoder::processDecodedFrame(AVFrame* frame, uint64_t timestamp) {
     stats_.framesDecoded++;
 
     // Convert pixel format if needed
-    AVFrame* outputFrame = frame;
+    AVFrame* outputFrame = cpuFrame;
     if (swsCtx_ && convertedFrame_) {
         av_frame_make_writable(convertedFrame_);
         sws_scale(
             swsCtx_,
-            frame->data, frame->linesize,
-            0, frame->height,
+            cpuFrame->data, cpuFrame->linesize,
+            0, cpuFrame->height,
             convertedFrame_->data, convertedFrame_->linesize
         );
-
-        // Diagnostic: log first BGRA pixel of first 3 frames
-        if (stats_.framesDecoded < 3 && convertedFrame_->data[0]) {
-            uint8_t* px = convertedFrame_->data[0];
-            Logger::instance().debugf("BGRA pixel[0]: B=%d G=%d R=%d A=%d  stride=%d  buf_align=%p",
-                px[0], px[1], px[2], px[3],
-                convertedFrame_->linesize[0],
-                (void*)convertedFrame_->data[0]);
-        }
-
         outputFrame = convertedFrame_;
     }
 
-    // Build output frame
+    // Build output frame (reuse persistent buffer to avoid per-frame malloc/page faults)
     if (onDecodedFrame_) {
-        DecodedFrame decodedFrame;
-        decodedFrame.width = width_;
-        decodedFrame.height = height_;
-        decodedFrame.timestamp = timestamp;
-        decodedFrame.format = config_.outputFormat;
+        outputDecodedFrame_.width = width_;
+        outputDecodedFrame_.height = height_;
+        outputDecodedFrame_.timestamp = timestamp;
+        outputDecodedFrame_.format = config_.outputFormat;
 
-        // Calculate output size and stride
         if (config_.outputFormat == OutputPixelFormat::BGRA ||
             config_.outputFormat == OutputPixelFormat::UYVY) {
-            // Packed formats - use FFmpeg stride as-is (may include padding)
-            decodedFrame.stride = outputFrame->linesize[0];
-            size_t dataSize = static_cast<size_t>(decodedFrame.stride) * height_;
-            decodedFrame.data.resize(dataSize);
-            std::memcpy(decodedFrame.data.data(), outputFrame->data[0], dataSize);
+            outputDecodedFrame_.stride = outputFrame->linesize[0];
+            size_t dataSize = static_cast<size_t>(outputDecodedFrame_.stride) * height_;
+            outputDecodedFrame_.data.resize(dataSize);  // no-op after first frame
+            std::memcpy(outputDecodedFrame_.data.data(), outputFrame->data[0], dataSize);
         } else {
-            // Planar formats (NV12, I420)
-            decodedFrame.stride = outputFrame->linesize[0];
+            outputDecodedFrame_.stride = outputFrame->linesize[0];
 
             if (config_.outputFormat == OutputPixelFormat::NV12) {
-                // Y plane + interleaved UV plane
                 size_t ySize = static_cast<size_t>(outputFrame->linesize[0]) * height_;
                 size_t uvSize = static_cast<size_t>(outputFrame->linesize[1]) * height_ / 2;
-                decodedFrame.data.resize(ySize + uvSize);
-                std::memcpy(decodedFrame.data.data(), outputFrame->data[0], ySize);
-                std::memcpy(decodedFrame.data.data() + ySize, outputFrame->data[1], uvSize);
+                outputDecodedFrame_.data.resize(ySize + uvSize);
+                std::memcpy(outputDecodedFrame_.data.data(), outputFrame->data[0], ySize);
+                std::memcpy(outputDecodedFrame_.data.data() + ySize, outputFrame->data[1], uvSize);
             } else {
-                // I420: Y + U + V planes
                 size_t ySize = static_cast<size_t>(outputFrame->linesize[0]) * height_;
                 size_t uSize = static_cast<size_t>(outputFrame->linesize[1]) * height_ / 2;
                 size_t vSize = static_cast<size_t>(outputFrame->linesize[2]) * height_ / 2;
-                decodedFrame.data.resize(ySize + uSize + vSize);
-                std::memcpy(decodedFrame.data.data(), outputFrame->data[0], ySize);
-                std::memcpy(decodedFrame.data.data() + ySize, outputFrame->data[1], uSize);
-                std::memcpy(decodedFrame.data.data() + ySize + uSize, outputFrame->data[2], vSize);
+                outputDecodedFrame_.data.resize(ySize + uSize + vSize);
+                std::memcpy(outputDecodedFrame_.data.data(), outputFrame->data[0], ySize);
+                std::memcpy(outputDecodedFrame_.data.data() + ySize, outputFrame->data[1], uSize);
+                std::memcpy(outputDecodedFrame_.data.data() + ySize + uSize, outputFrame->data[2], vSize);
             }
         }
 
-        onDecodedFrame_(decodedFrame);
+        onDecodedFrame_(outputDecodedFrame_);
     }
 }
 

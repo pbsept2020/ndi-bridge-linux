@@ -161,7 +161,11 @@ target_link_libraries(ndi-bridge PRIVATE
 )
 
 if(APPLE)
-    target_link_libraries(ndi-bridge PRIVATE "-framework CoreFoundation")
+    target_link_libraries(ndi-bridge PRIVATE
+        "-framework CoreFoundation"
+        "-framework VideoToolbox"
+        "-framework CoreMedia"
+    )
 endif()
 
 target_include_directories(ndi-bridge PRIVATE

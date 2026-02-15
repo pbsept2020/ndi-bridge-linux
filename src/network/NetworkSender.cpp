@@ -139,6 +139,7 @@ bool NetworkSender::sendVideo(const uint8_t* data, size_t size, bool isKeyframe,
             static_cast<uint16_t>(payloadSize),
             isKeyframe
         );
+        header.sendTimestamp = Protocol::wallClockNs();
 
         // Serialize header
         Protocol::serializeInto(header, packet.data());
@@ -194,6 +195,7 @@ bool NetworkSender::sendAudio(const uint8_t* data, size_t size, uint64_t timesta
             sampleRate,
             channels
         );
+        header.sendTimestamp = Protocol::wallClockNs();
 
         // Serialize header
         Protocol::serializeInto(header, packet.data());

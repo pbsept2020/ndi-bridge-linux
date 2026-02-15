@@ -48,7 +48,8 @@ int JoinMode::start(std::atomic<bool>& running) {
     decoder_ = std::make_unique<VideoDecoder>();
 
     VideoDecoderConfig decoderConfig;
-    decoderConfig.outputFormat = OutputPixelFormat::BGRA;
+    decoderConfig.outputFormat = OutputPixelFormat::UYVY;
+    decoderConfig.useHardwareAccel = true;
     if (!decoder_->configure(decoderConfig)) {
         LOG_ERROR("Failed to configure video decoder");
         return 1;
@@ -141,7 +142,8 @@ int JoinMode::start(std::atomic<bool>& running) {
                 ? 100.0 * videoReasmStats.totalFragmentsReceivedBeforeDrop / videoReasmStats.totalFragmentsExpectedBeforeDrop : 0.0;
             double decAvgMs = decodeCount_ > 0 ? (totalDecodeTimeUs_.load() / (double)decodeCount_.load()) / 1000.0 : 0.0;
             double decMaxMs = maxDecodeTimeUs_.load() / 1000.0;
-            log.debugf("Stats: pkts=%lu recv=%lu dropped=%lu(avg %lu/%lu frags %.0f%%) decoded=%lu output=%lu qdrop=%lu decode_ms=%.1f/%.1f audio=%lu time=%.1fs",
+            int64_t latencyAvgMs = netStats.latencyCount > 0 ? netStats.latencySumMs / static_cast<int64_t>(netStats.latencyCount) : 0;
+            log.debugf("Stats: pkts=%lu recv=%lu dropped=%lu(avg %lu/%lu frags %.0f%%) decoded=%lu output=%lu qdrop=%lu decode_ms=%.1f/%.1f latency_ms=%ld audio=%lu time=%.1fs",
                       netStats.packetsReceived,
                       stats.videoFramesReceived,
                       netStats.framesDropped,
@@ -150,6 +152,7 @@ int JoinMode::start(std::atomic<bool>& running) {
                       stats.videoFramesOutput,
                       videoFramesDroppedQueue_.load(),
                       decAvgMs, decMaxMs,
+                      latencyAvgMs,
                       stats.audioFramesOutput,
                       stats.runTimeSeconds);
         }
@@ -165,6 +168,7 @@ int JoinMode::start(std::atomic<bool>& running) {
         ? 100.0 * finalReasmStats.totalFragmentsReceivedBeforeDrop / finalReasmStats.totalFragmentsExpectedBeforeDrop : 0.0;
     double finalDecAvgMs = decodeCount_ > 0 ? (totalDecodeTimeUs_.load() / (double)decodeCount_.load()) / 1000.0 : 0.0;
     double finalDecMaxMs = maxDecodeTimeUs_.load() / 1000.0;
+    int64_t finalLatencyAvgMs = finalNetStats.latencyCount > 0 ? finalNetStats.latencySumMs / static_cast<int64_t>(finalNetStats.latencyCount) : 0;
     log.success("═══════════════════════════════════════════════════════");
     log.success("JOIN MODE STOPPED");
     log.successf("Duration: %.1f seconds", finalStats.runTimeSeconds);
@@ -181,6 +185,10 @@ int JoinMode::start(std::atomic<bool>& running) {
                  videoFramesDroppedQueue_.load());
     log.successf("Decode: avg=%.1fms max=%.1fms (%lu frames)",
                  finalDecAvgMs, finalDecMaxMs, decodeCount_.load());
+    if (finalNetStats.latencyCount > 0) {
+        log.successf("Latency: avg=%ldms (%lu samples)",
+                     finalLatencyAvgMs, finalNetStats.latencyCount);
+    }
     log.successf("Audio: %lu received, %lu output",
                  finalStats.audioFramesReceived, finalStats.audioFramesOutput);
     log.success("═══════════════════════════════════════════════════════");

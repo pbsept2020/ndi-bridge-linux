@@ -37,6 +37,9 @@ struct NetworkReceiverStats {
     uint64_t audioFramesReceived = 0;
     uint64_t framesDropped = 0;
     uint64_t invalidPackets = 0;
+    // One-way latency estimate (send timestamp based)
+    int64_t  latencySumMs = 0;
+    uint64_t latencyCount = 0;
 };
 
 /**
@@ -140,7 +143,7 @@ public:
 
 private:
     void receiveLoop();
-    void processPacket(const uint8_t* data, size_t size);
+    void processPacket(const uint8_t* data, size_t size, uint64_t recvTimestampNs);
 
     NetworkReceiverConfig config_;
     int socket_ = -1;

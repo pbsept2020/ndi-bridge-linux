@@ -151,6 +151,10 @@ private:
     // NDI handles (opaque)
     void* sender_ = nullptr;
 
+    // Double-buffer for async video send (NDI keeps reference until next send)
+    std::vector<uint8_t> asyncVideoBuf_[2];
+    int currentBuf_ = 0;
+
     // Frame rate detection
     uint64_t lastTimestamp_ = 0;
     std::vector<double> frameIntervals_;

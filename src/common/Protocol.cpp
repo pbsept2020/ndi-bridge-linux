@@ -2,6 +2,7 @@
 #include "common/Logger.h"
 #include <sstream>
 #include <iomanip>
+#include <ctime>
 
 namespace ndi_bridge {
 
@@ -29,6 +30,7 @@ PacketHeader Protocol::createVideoHeader(
     header.sampleRate = 0;
     header.channels = 0;
     std::memset(header.reserved, 0, sizeof(header.reserved));
+    header.sendTimestamp = 0;
     return header;
 }
 
@@ -57,6 +59,7 @@ PacketHeader Protocol::createAudioHeader(
     header.sampleRate = sampleRate;
     header.channels = channels;
     std::memset(header.reserved, 0, sizeof(header.reserved));
+    header.sendTimestamp = 0;
     return header;
 }
 
@@ -92,10 +95,13 @@ void Protocol::serializeInto(const PacketHeader& header, uint8_t* buffer) {
     std::memcpy(buffer + 30, &sampleRate, 4); // 30-33: sampleRate
     buffer[34] = header.channels;             // 34: channels
     std::memset(buffer + 35, 0, 3);           // 35-37: reserved
+    uint64_t sendTs = endian::hton64(header.sendTimestamp);
+    std::memcpy(buffer + 38, &sendTs, 8);     // 38-45: sendTimestamp
 }
 
 std::optional<PacketHeader> Protocol::deserialize(const uint8_t* data, size_t size) {
-    if (size < HEADER_SIZE) {
+    // Accept legacy 38-byte headers for backward compat
+    if (size < LEGACY_HEADER_SIZE) {
         return std::nullopt;
     }
 
@@ -150,6 +156,15 @@ std::optional<PacketHeader> Protocol::deserialize(const uint8_t* data, size_t si
     header.channels = data[34];
     std::memset(header.reserved, 0, 3);
 
+    // sendTimestamp: only present in 46-byte headers
+    if (size >= HEADER_SIZE) {
+        uint64_t sendTs;
+        std::memcpy(&sendTs, data + 38, 8);
+        header.sendTimestamp = endian::ntoh64(sendTs);
+    } else {
+        header.sendTimestamp = 0;
+    }
+
     return header;
 }
 
@@ -196,6 +211,13 @@ uint64_t Protocol::nsToTimestamp(uint64_t nanoseconds) {
 uint64_t Protocol::timestampToNs(uint64_t timestamp) {
     // Convert 10M ticks/sec to nanoseconds
     return timestamp * 100;
+}
+
+uint64_t Protocol::wallClockNs() {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL
+         + static_cast<uint64_t>(ts.tv_nsec);
 }
 
 // FrameReassembler implementation

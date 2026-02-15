@@ -3,10 +3,10 @@
 /**
  * Protocol.h - NDI Bridge UDP Protocol Header
  *
- * 38-byte Big-Endian header format compatible with macOS Swift version.
+ * 46-byte Big-Endian header format.
  * This header precedes all UDP packets in the NDI Bridge protocol.
  *
- * Layout (MUST match Swift MediaPacketHeader exactly):
+ * Layout:
  *   Offset | Field          | Type   | Description
  *   -------|----------------|--------|---------------------------
  *   0-3    | magic          | U32    | 0x4E444942 ("NDIB")
@@ -22,7 +22,8 @@
  *   28-29  | payloadSize    | U16    | Payload size in this packet
  *   30-33  | sampleRate     | U32    | Audio: sample rate (48000)
  *   34     | channels       | U8     | Audio: channel count (2)
- *   35-37  | reserved       | U8[3]  | Padding to 38 bytes
+ *   35-37  | reserved       | U8[3]  | Reserved
+ *   38-45  | sendTimestamp   | U64    | Wall clock at send time (ns since epoch)
  */
 
 #include <cstdint>
@@ -36,9 +37,10 @@ namespace ndi_bridge {
 // Protocol constants
 constexpr uint32_t PROTOCOL_MAGIC = 0x4E444942;  // "NDIB"
 constexpr uint8_t  PROTOCOL_VERSION = 2;
-constexpr size_t   HEADER_SIZE = 38;
-constexpr size_t   DEFAULT_MTU = 1400;           // Match Mac bridge (1400 - 38 = 1362 payload)
-constexpr size_t   MAX_UDP_PAYLOAD = DEFAULT_MTU - HEADER_SIZE;  // 1362 bytes
+constexpr size_t   HEADER_SIZE = 46;
+constexpr size_t   LEGACY_HEADER_SIZE = 38;      // Pre-sendTimestamp header size
+constexpr size_t   DEFAULT_MTU = 1400;
+constexpr size_t   MAX_UDP_PAYLOAD = DEFAULT_MTU - HEADER_SIZE;  // 1354 bytes
 constexpr size_t   MAX_PACKET_SIZE = DEFAULT_MTU;
 
 // Timestamp resolution: 10,000,000 ticks per second (same as NDI)
@@ -50,10 +52,9 @@ enum class MediaType : uint8_t {
 };
 
 /**
- * PacketHeader - 38-byte protocol header
+ * PacketHeader - 46-byte protocol header
  *
  * All multi-byte fields are stored in Big-Endian (network byte order).
- * This structure MUST match Swift MediaPacketHeader for cross-platform compatibility.
  */
 #pragma pack(push, 1)
 struct PacketHeader {
@@ -70,7 +71,8 @@ struct PacketHeader {
     uint16_t payloadSize;     // 28-29: This packet's payload size
     uint32_t sampleRate;      // 30-33: Audio sample rate
     uint8_t  channels;        // 34:    Audio channels
-    uint8_t  reserved[3];     // 35-37: Reserved (padding)
+    uint8_t  reserved[3];     // 35-37: Reserved
+    uint64_t sendTimestamp;    // 38-45: Wall clock at send time (ns since epoch)
 
     // Helper methods
     bool isKeyframe() const { return (flags & 0x01) != 0; }
@@ -80,7 +82,7 @@ struct PacketHeader {
 #pragma pack(pop)
 
 static_assert(sizeof(PacketHeader) == HEADER_SIZE,
-              "PacketHeader must be exactly 38 bytes");
+              "PacketHeader must be exactly 46 bytes");
 
 /**
  * Byte-order conversion utilities (host <-> network/big-endian)
@@ -191,6 +193,11 @@ public:
      * Convert protocol timestamp to nanoseconds
      */
     static uint64_t timestampToNs(uint64_t timestamp);
+
+    /**
+     * Get current wall clock time in nanoseconds (CLOCK_REALTIME)
+     */
+    static uint64_t wallClockNs();
 };
 
 /**
