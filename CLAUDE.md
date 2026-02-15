@@ -59,11 +59,12 @@ Tout le reste (FFmpeg, NDI SDK, Protocol, Video*, JoinMode, HostMode) compile te
 
 ### Roadmap
 
-1. Débugger l'affichage "Linux Ball" dans Studio Monitor
-2. Ajouter `h264_videotoolbox` dans VideoEncoder.cpp (encodage hardware Mac)
-3. Test EC2 mac2.metal (valider fps réels et WAN)
-4. Port Windows (ajouter `#ifdef _WIN32` dans Network*)
-5. Deprecate ndi-bridge-mac (Swift) une fois le C++ complet
+1. ~~Ajouter `h264_videotoolbox` dans VideoEncoder.cpp~~ — **FAIT** (v2.0, auto-detect + fallback)
+2. ~~Encodage async (thread dédié)~~ — **FAIT** (v2.0, queue bornée 3 frames)
+3. ~~Fix exclude pattern~~ — **FAIT** (v2.0, --source bypasse le filtre)
+4. Retester performance EC2→Mac avec hwaccel + async
+5. Port Windows (ajouter `#ifdef _WIN32` dans Network*)
+6. Deprecate ndi-bridge-mac (Swift) une fois le C++ complet
 
 ### Viewers
 
@@ -342,7 +343,7 @@ au lieu de parser et envoyer chaque NAL unit séparément.
 units individuellement au lieu du frame complet.
 
 ## Version
-Actuelle : v1.9 (15 fév 2026)
+Actuelle : v2.0 (15 fév 2026)
 
 
 La version est définie dans `src/common/Version.h` (macro `NDI_BRIDGE_VERSION`).
@@ -402,16 +403,21 @@ Options `--ball-color` : green (défaut), red, blue, yellow, cyan, magenta, whit
 - **Validé cross-machine** (15 fév 2026) : bille verte Mac + bille rouge EC2 via bridge,
   delta TC = 3 frames = ~120ms one-way (cohérent avec SpeedFusion RTT 225ms / 2)
 
-## État actuel (v1.9 — 15 fév 2026)
+## État actuel (v2.0 — 15 fév 2026)
 
 ### Ce qui marche
 - **Build cross-platform** : Mac (build-mac/) et Linux (build/) depuis le même codebase C++
+- **Encodage async** (v2.0) : thread dédié pour l'encodage H.264, découplé du thread NDI recv. Queue bornée (3 frames, drop-oldest). Le host peut maintenant recevoir à 25fps sans blocage par l'encodeur
+- **VideoToolbox hardware encoding** (v2.0) : sur macOS, `h264_videotoolbox` (~1-5ms par frame) avec fallback automatique vers `libx264` (~60-100ms). Le gain combiné async+hwaccel = host Mac à 25fps stable
+- **VideoToolbox hardware decoding** (v2.0) : sur macOS, décodage GPU via `av_hwframe_transfer_data()` avec fallback software
+- **Exclude pattern fixé** (v2.0) : `--source` explicite bypasse les excludePatterns
+- **NDI async send** (v2.0) : double-buffer pour `send_video_async_v2()` dans NDISender
 - **Host Mac → EC2 Frankfurt** : zero-drop, 25fps, audio OK
 - **Join EC2 décode et publie en NDI** : dropped=0, qdrop=0, decode_ms ~8.4ms
-- **Host EC2 → Mac via SpeedFusion** : fonctionne ! Le host EC2 envoie vers l'IP LAN Mac (192.168.1.9) via le tunnel SpeedFusion Balance 20 ↔ FusionHub AWS
+- **Host EC2 → Mac via SpeedFusion** : fonctionne via IP LAN (192.168.1.9)
 - **Round-trip EC2↔Mac** : validé dans les deux sens via SpeedFusion
 - **NDI Viewer v1.9** : 10 pro features (OSD, safe area, grid, tally, source switching)
-- **Test pattern UTC-déterministe** : bille + TC + LTC tous synchronisés UTC, `--ball-color` pour distinguer les sources, validé cross-machine (bille verte Mac + rouge EC2, delta = 3 frames = latence bridge)
+- **Test pattern UTC-déterministe** : bille + TC + LTC tous synchronisés UTC, `--ball-color` pour distinguer les sources, validé cross-machine
 - **SpeedFusion VPN** : tunnel Balance 20 ↔ FusionHub AWS opérationnel, EC2 ping Mac LAN en ~200ms
 - **ChronyControl Mac** : remplace `timed`, offset NTP < 1ms (15 fév 2026)
 - **Mesure latence sendTimestamp VALIDÉE** (15 fév 2026) :
@@ -423,20 +429,30 @@ Options `--ball-color` : green (défaut), red, blue, yellow, cyan, magenta, whit
 
 ### Ce qui bloque
 - **sudo obligatoire pour join Mac via en7/SpeedFusion** : bug NECP macOS, les processus non-root ne reçoivent pas l'UDP via l'interface secondaire en7 (AX88179A). Contournement : `sudo ./build-mac/ndi-bridge join`. Voir section dédiée ci-dessous.
-- **Performance retour EC2→Mac** : qdrop élevé (193/732), decode_ms=53.7/124.9 — le décodeur Mac n'arrive pas à suivre, probablement lié à la latence SpeedFusion (~200ms) qui cause de l'accumulation
-- **Exclude pattern trop agressif** : le host filtre toute source contenant "Bridge" AVANT de vérifier --source explicite. Quand --source est explicite, le filtre ne devrait pas s'appliquer. Voir findNDISource() lignes 325-330.
+- **Performance retour EC2→Mac** : qdrop élevé (193/732), decode_ms=53.7/124.9 — le décodeur Mac n'arrive pas à suivre, probablement lié à la latence SpeedFusion (~200ms) qui cause de l'accumulation. Le hwaccel decode (v2.0) devrait améliorer ça — à retester
 
 ### Infra EC2 Frankfurt (eu-central-1)
+
+#### Relay (ltc-ndi-test) — host Mac→EC2, join EC2→NDI local
 - Instance : ltc-ndi-test (t3.medium spot)
 - IP publique : 54.93.225.67
 - IP privée : 172.31.44.6
-- Clé SSH : ~/.secrets/aws/ltc-ndi-test-frankfurt.pem
+- Clé SSH : `~/.secrets/aws/ltc-ndi-test-frankfurt.pem`
 - User : ubuntu
-- Commande : ssh -i ~/.secrets/aws/ltc-ndi-test-frankfurt.pem ubuntu@54.93.225.67
+- Commande : `ssh -i ~/.secrets/aws/ltc-ndi-test-frankfurt.pem ubuntu@54.93.225.67`
 - NDI Discovery Server : 3.74.169.239
 - SG : sg-0761c1bb83aecc17a (NDI_Security_aws_group) — UDP 5990-5999 ouvert depuis 0.0.0.0/0
 - Déployé : ndi-bridge-linux compilé, NDI SDK Linux 6, libltc-dev
 - **Instance ltc-ndi-source (i-01a2f7179d76c22c2) TERMINÉE** le 15 fév — ancienne instance spot qui floodait le port 5990 avec des paquets 38 bytes (ancien protocole)
+
+#### Return (vmix-frankfurt) — host EC2→Mac retour
+- Instance : vmix-frankfurt
+- IP publique : 18.156.120.21
+- Clé SSH : `~/.secrets/aws/vmix-frankfurt-key.pem`
+- User : ubuntu
+- Commande : `ssh -i ~/.secrets/aws/vmix-frankfurt-key.pem ubuntu@18.156.120.21`
+
+**⚠️ Les deux instances utilisent des clés SSH DIFFÉRENTES. Ne pas intervertir.**
 
 ### SpeedFusion VPN (Balance 20 ↔ FusionHub AWS)
 - Le tunnel SpeedFusion relie le LAN Peplink (192.168.1.x) au VPC AWS (172.31.x.x)
@@ -509,11 +525,9 @@ Utiliser deploy-vm.sh (mis à jour pour EC2) :
 - EC2 → Mac : utiliser IP LAN Peplink (192.168.1.9) via SpeedFusion — PAS l'IP publique (NAT bloque)
 
 ### Prochaines étapes
-1. **Optimiser performance retour EC2→Mac** — qdrop élevé, investiguer : buffer côté join, tuning décodeur, ou réduire bitrate/résolution
-2. **Fix exclude pattern** — quand --source est explicite, bypasser excludePatterns dans findNDISource()
-3. **Calibration NTP optionnelle** — échange ping/pong au démarrage pour soustraire l'offset NTP résiduel du delta sendTimestamp
-4. **Ajouter `h264_videotoolbox`** dans VideoEncoder.cpp (encodage hardware Mac)
-5. **Port Windows** (ajouter `#ifdef _WIN32` dans Network*)
+1. **Retester performance retour EC2→Mac** — avec hwaccel decode + async encode (v2.0), les qdrop devraient baisser
+2. **Calibration NTP optionnelle** — échange ping/pong au démarrage pour soustraire l'offset NTP résiduel du delta sendTimestamp
+3. **Port Windows** (ajouter `#ifdef _WIN32` dans Network*)
 
 ## Protocole
 
