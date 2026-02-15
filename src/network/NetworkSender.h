@@ -13,6 +13,7 @@
 #include <functional>
 #include <atomic>
 #include <mutex>
+#include "../common/Platform.h"
 
 namespace ndi_bridge {
 
@@ -134,7 +135,7 @@ private:
     bool sendPacket(const uint8_t* data, size_t size);
 
     NetworkSenderConfig config_;
-    int socket_ = -1;
+    socket_t socket_ = INVALID_SOCKET_VAL;
     std::atomic<bool> connected_{false};
 
     // Sequence number for frames (incremented per frame, not per packet)

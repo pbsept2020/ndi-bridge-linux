@@ -19,6 +19,18 @@ if(APPLE)
         /usr/local
         /usr
     )
+elseif(WIN32)
+    set(NDI_SEARCH_PATHS
+        # Windows: Official NDI SDK install paths
+        "C:/Program Files/NDI/NDI 6 SDK"
+        "C:/Program Files/NDI/NDI 5 SDK"
+        "C:/Program Files/NewTek/NDI 6 SDK"
+        "C:/Program Files/NewTek/NDI 5 SDK"
+        # Environment variable
+        "$ENV{NDI_SDK_DIR}"
+        "$ENV{NDI_RUNTIME_DIR_V6}"
+        "$ENV{NDI_RUNTIME_DIR_V5}"
+    )
 else()
     set(NDI_SEARCH_PATHS
         # Standard system paths (Linux)
@@ -44,7 +56,7 @@ find_path(NDI_INCLUDE_DIR
         include
         Include
         "include/ndi"
-        "include"
+        "Include"
     ${APPLE_NO_DEFAULT}
 )
 
@@ -59,6 +71,17 @@ if(APPLE)
             lib
             "lib/macOS"
         NO_DEFAULT_PATH
+    )
+elseif(WIN32)
+    set(NDI_LIB_NAMES "Processing.NDI.Lib.x64" "ndi")
+    find_library(NDI_LIBRARY
+        NAMES ${NDI_LIB_NAMES}
+        PATHS ${NDI_SEARCH_PATHS}
+        PATH_SUFFIXES
+            Lib/x64
+            lib/x64
+            Lib
+            lib
     )
 else()
     set(NDI_LIB_NAMES ndi)

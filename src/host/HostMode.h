@@ -92,7 +92,7 @@ public:
 
 private:
     // Callbacks wired to components
-    void onVideoFrame(const NDIVideoFrame& frame);
+    void onVideoFrame(NDIVideoFrame frame);
     void onAudioFrame(const NDIAudioFrame& frame);
     void onEncodedFrame(const EncodedFrame& frame);
     void onNDIError(const std::string& error);

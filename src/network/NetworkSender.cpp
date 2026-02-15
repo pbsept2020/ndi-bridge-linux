@@ -2,13 +2,7 @@
 #include "common/Protocol.h"
 #include "common/Logger.h"
 
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
-#include <fcntl.h>
 #include <cstring>
-#include <cerrno>
 #include <thread>
 #include <chrono>
 
@@ -41,21 +35,24 @@ bool NetworkSender::connect(const std::string& host, uint16_t port) {
 
     // Create UDP socket
     socket_ = socket(AF_INET, SOCK_DGRAM, 0);
-    if (socket_ < 0) {
-        Logger::instance().errorf("Failed to create socket: %s", strerror(errno));
+    if (socket_ == INVALID_SOCKET_VAL) {
+        int err = platform_socket_errno();
+        Logger::instance().errorf("Failed to create socket: %s", platform_socket_strerror(err));
         if (onError_) {
-            onError_(std::string("Failed to create socket: ") + strerror(errno));
+            onError_(std::string("Failed to create socket: ") + platform_socket_strerror(err));
         }
         return false;
     }
 
     // Set socket options
     int optval = 1;
-    setsockopt(socket_, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+    setsockopt(socket_, SOL_SOCKET, SO_REUSEADDR,
+               reinterpret_cast<const char*>(&optval), sizeof(optval));
 
     // Increase send buffer size — match Mac's aggressive non-blocking pattern
     int sendbuf = 4 * 1024 * 1024;  // 4MB
-    setsockopt(socket_, SOL_SOCKET, SO_SNDBUF, &sendbuf, sizeof(sendbuf));
+    setsockopt(socket_, SOL_SOCKET, SO_SNDBUF,
+               reinterpret_cast<const char*>(&sendbuf), sizeof(sendbuf));
 
     // Setup destination address
     struct sockaddr_in destAddr{};
@@ -64,8 +61,8 @@ bool NetworkSender::connect(const std::string& host, uint16_t port) {
 
     if (inet_pton(AF_INET, host.c_str(), &destAddr.sin_addr) <= 0) {
         Logger::instance().errorf("Invalid address: %s", host.c_str());
-        close(socket_);
-        socket_ = -1;
+        platform_close_socket(socket_);
+        socket_ = INVALID_SOCKET_VAL;
         if (onError_) {
             onError_("Invalid address: " + host);
         }
@@ -74,20 +71,18 @@ bool NetworkSender::connect(const std::string& host, uint16_t port) {
 
     // Connect UDP socket (sets default destination)
     if (::connect(socket_, reinterpret_cast<struct sockaddr*>(&destAddr), sizeof(destAddr)) < 0) {
-        Logger::instance().errorf("Failed to connect: %s", strerror(errno));
-        close(socket_);
-        socket_ = -1;
+        int err = platform_socket_errno();
+        Logger::instance().errorf("Failed to connect: %s", platform_socket_strerror(err));
+        platform_close_socket(socket_);
+        socket_ = INVALID_SOCKET_VAL;
         if (onError_) {
-            onError_(std::string("Failed to connect: ") + strerror(errno));
+            onError_(std::string("Failed to connect: ") + platform_socket_strerror(err));
         }
         return false;
     }
 
     // Set non-blocking mode for fire-and-forget UDP (match Mac .idempotent send)
-    int flags = fcntl(socket_, F_GETFL, 0);
-    if (flags >= 0) {
-        fcntl(socket_, F_SETFL, flags | O_NONBLOCK);
-    }
+    platform_set_nonblocking(socket_);
 
     connected_ = true;
     Logger::instance().successf("Connected to %s:%u (non-blocking, pacing: %dus)",
@@ -101,9 +96,9 @@ bool NetworkSender::connect(const std::string& host, uint16_t port) {
 }
 
 void NetworkSender::disconnect() {
-    if (socket_ >= 0) {
-        close(socket_);
-        socket_ = -1;
+    if (socket_ != INVALID_SOCKET_VAL) {
+        platform_close_socket(socket_);
+        socket_ = INVALID_SOCKET_VAL;
     }
     connected_ = false;
 
@@ -227,10 +222,16 @@ bool NetworkSender::sendRaw(const uint8_t* data, size_t size) {
 }
 
 bool NetworkSender::sendPacket(const uint8_t* data, size_t size) {
+#ifdef _WIN32
+    int sent = send(socket_, reinterpret_cast<const char*>(data),
+                    static_cast<int>(size), 0);
+#else
     ssize_t sent = send(socket_, data, size, MSG_DONTWAIT);
+#endif
 
     if (sent < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        int err = platform_socket_errno();
+        if (err == PLATFORM_EAGAIN || err == PLATFORM_EWOULDBLOCK) {
             // Non-blocking socket: kernel buffer full — drop packet (real-time behavior)
             // This matches Mac's .idempotent send completion (fire-and-forget)
             {
@@ -248,7 +249,7 @@ bool NetworkSender::sendPacket(const uint8_t* data, size_t size) {
             if (now - lastErrorLog >= std::chrono::seconds(1)) {
                 lastErrorLog = now;
                 Logger::instance().errorf("Send error: %s (total: %lu)",
-                                          strerror(errno), stats_.sendErrors);
+                                          platform_socket_strerror(err), stats_.sendErrors);
             }
         }
         return false;

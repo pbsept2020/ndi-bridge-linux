@@ -1,3 +1,3 @@
 #pragma once
 
-#define NDI_BRIDGE_VERSION "v2.0"
+#define NDI_BRIDGE_VERSION "v2.1"

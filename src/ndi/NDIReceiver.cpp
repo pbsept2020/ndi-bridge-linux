@@ -380,7 +380,7 @@ void NDIReceiver::receiveLoop() {
                     frame.data.resize(dataSize);
                     std::memcpy(frame.data.data(), videoFrame.p_data, dataSize);
 
-                    onVideoFrame_(frame);
+                    onVideoFrame_(std::move(frame));
                     stats_.videoFramesReceived++;
                 }
 

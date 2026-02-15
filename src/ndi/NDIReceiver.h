@@ -55,7 +55,7 @@ struct NDIAudioFrame {
 /**
  * Callback types
  */
-using OnNDIVideoFrame = std::function<void(const NDIVideoFrame& frame)>;
+using OnNDIVideoFrame = std::function<void(NDIVideoFrame frame)>;
 using OnNDIAudioFrame = std::function<void(const NDIAudioFrame& frame)>;
 using OnNDIError = std::function<void(const std::string& error)>;
 

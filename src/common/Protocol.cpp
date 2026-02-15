@@ -2,7 +2,6 @@
 #include "common/Logger.h"
 #include <sstream>
 #include <iomanip>
-#include <ctime>
 
 namespace ndi_bridge {
 
@@ -214,10 +213,7 @@ uint64_t Protocol::timestampToNs(uint64_t timestamp) {
 }
 
 uint64_t Protocol::wallClockNs() {
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    return static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL
-         + static_cast<uint64_t>(ts.tv_nsec);
+    return platform::wallClockNs();
 }
 
 // FrameReassembler implementation

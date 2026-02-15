@@ -31,6 +31,7 @@
 #include <vector>
 #include <optional>
 #include <string>
+#include "Platform.h"
 
 namespace ndi_bridge {
 
@@ -90,27 +91,16 @@ static_assert(sizeof(PacketHeader) == HEADER_SIZE,
 namespace endian {
 
 inline uint16_t hton16(uint16_t value) {
-    #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-        return __builtin_bswap16(value);
-    #else
-        return value;
-    #endif
+    // All target platforms (x86_64, ARM64) are little-endian
+    return platform::bswap16(value);
 }
 
 inline uint32_t hton32(uint32_t value) {
-    #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-        return __builtin_bswap32(value);
-    #else
-        return value;
-    #endif
+    return platform::bswap32(value);
 }
 
 inline uint64_t hton64(uint64_t value) {
-    #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-        return __builtin_bswap64(value);
-    #else
-        return value;
-    #endif
+    return platform::bswap64(value);
 }
 
 inline uint16_t ntoh16(uint16_t value) { return hton16(value); }

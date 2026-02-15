@@ -19,6 +19,11 @@
 #include <csignal>
 #include <atomic>
 
+#ifdef _WIN32
+#include "common/Platform.h"
+#include <windows.h>
+#endif
+
 #include "common/Logger.h"
 #include "common/Protocol.h"
 #include "host/HostMode.h"
@@ -42,6 +47,17 @@ void signalHandler(int signal) {
         g_running = false;
     }
 }
+
+#ifdef _WIN32
+BOOL WINAPI consoleCtrlHandler(DWORD ctrlType) {
+    if (ctrlType == CTRL_C_EVENT || ctrlType == CTRL_BREAK_EVENT || ctrlType == CTRL_CLOSE_EVENT) {
+        LOG_INFO("Shutdown requested...");
+        g_running = false;
+        return TRUE;
+    }
+    return FALSE;
+}
+#endif
 
 // Command-line argument parser
 struct Config {
@@ -241,7 +257,16 @@ int runJoin(const Config& config) {
 int main(int argc, char* argv[]) {
     // Setup signal handlers
     std::signal(SIGINT, signalHandler);
+#ifndef _WIN32
     std::signal(SIGTERM, signalHandler);
+#else
+    SetConsoleCtrlHandler(consoleCtrlHandler, TRUE);
+    // Initialize WinSock
+    if (!ndi_bridge::WinSockInit::initialize()) {
+        LOG_ERROR("Failed to initialize WinSock");
+        return 1;
+    }
+#endif
 
     // Parse arguments
     Config config = parseArgs(argc, argv);
@@ -282,6 +307,9 @@ int main(int argc, char* argv[]) {
 
     // Cleanup
     NDIlib_destroy();
+#ifdef _WIN32
+    ndi_bridge::WinSockInit::cleanup();
+#endif
     LOG_SUCCESS("NDI Bridge shutdown complete");
 
     return result;

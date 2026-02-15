@@ -1,6 +1,7 @@
 #include "video/VideoEncoder.h"
 #include "common/Logger.h"
 #include "common/Protocol.h"
+#include <string>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -80,6 +81,22 @@ bool VideoEncoder::initEncoder() {
             hwAccelActive_ = true;
         }
     }
+#elif defined(_WIN32)
+    // Try NVIDIA NVENC hardware encoder on Windows
+    if (config_.useHardwareAccel) {
+        codec = avcodec_find_encoder_by_name("h264_nvenc");
+        if (codec) {
+            Logger::instance().info("Trying hardware encoder: h264_nvenc");
+            hwAccelActive_ = true;
+        } else {
+            // Fallback: try Intel QuickSync
+            codec = avcodec_find_encoder_by_name("h264_qsv");
+            if (codec) {
+                Logger::instance().info("Trying hardware encoder: h264_qsv");
+                hwAccelActive_ = true;
+            }
+        }
+    }
 #endif
 
     if (!codec) {
@@ -123,21 +140,39 @@ bool VideoEncoder::initEncoder() {
     int ret;
 
     if (hwAccelActive_) {
-        // VideoToolbox settings
-        codecCtx_->pix_fmt = AV_PIX_FMT_NV12;  // VideoToolbox prefers NV12
+        // Hardware encoder settings (VideoToolbox on macOS, NVENC/QSV on Windows)
+        codecCtx_->pix_fmt = AV_PIX_FMT_NV12;  // All hw encoders prefer NV12
+
+#ifdef __APPLE__
+        // VideoToolbox-specific options
         av_dict_set(&opts, "realtime", "1", 0);
         av_dict_set(&opts, "allow_sw", "1", 0);  // Fall back to software if HW unavailable
         av_dict_set(&opts, "profile", "high", 0);
         av_dict_set(&opts, "level", "4.1", 0);
+#elif defined(_WIN32)
+        // NVENC / QSV options — low latency streaming
+        if (std::string(codec->name) == "h264_nvenc") {
+            av_dict_set(&opts, "preset", "p4", 0);       // Balanced quality/speed
+            av_dict_set(&opts, "tune", "ll", 0);          // Low latency
+            av_dict_set(&opts, "rc", "cbr", 0);           // Constant bitrate
+            av_dict_set(&opts, "gpu", "0", 0);
+            av_dict_set(&opts, "zerolatency", "1", 0);
+            av_dict_set(&opts, "profile", "high", 0);
+        } else if (std::string(codec->name) == "h264_qsv") {
+            av_dict_set(&opts, "preset", "fast", 0);
+            av_dict_set(&opts, "profile", "high", 0);
+        }
+#endif
 
         ret = avcodec_open2(codecCtx_, codec, &opts);
         av_dict_free(&opts);
 
         if (ret < 0) {
-            // VideoToolbox failed — fall back to libx264
+            // Hardware encoder failed — fall back to libx264
             char errbuf[256];
             av_strerror(ret, errbuf, sizeof(errbuf));
-            Logger::instance().infof("VideoToolbox failed (%s), falling back to libx264", errbuf);
+            Logger::instance().infof("Hardware encoder '%s' failed (%s), falling back to libx264",
+                                     codec->name, errbuf);
 
             avcodec_free_context(&codecCtx_);
             hwAccelActive_ = false;

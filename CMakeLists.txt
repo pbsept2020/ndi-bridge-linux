@@ -141,7 +141,16 @@ if(AVCODEC_FOUND)
     target_compile_definitions(ndi_bridge_common PUBLIC HAVE_FFMPEG=1)
 endif()
 
-target_compile_options(ndi_bridge_common PRIVATE -Wall -Wextra -Wpedantic)
+if(MSVC)
+    target_compile_options(ndi_bridge_common PRIVATE /W3)
+else()
+    target_compile_options(ndi_bridge_common PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+# Windows: link WinSock2
+if(WIN32)
+    target_link_libraries(ndi_bridge_common PUBLIC ws2_32)
+endif()
 
 # --- macOS RPATH for NDI SDK ---
 if(APPLE AND NDI_LIBRARY_DIR)

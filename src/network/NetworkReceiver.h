@@ -146,7 +146,7 @@ private:
     void processPacket(const uint8_t* data, size_t size, uint64_t recvTimestampNs);
 
     NetworkReceiverConfig config_;
-    int socket_ = -1;
+    socket_t socket_ = INVALID_SOCKET_VAL;
     std::atomic<bool> listening_{false};
     std::atomic<bool> shouldStop_{false};
     std::thread receiveThread_;

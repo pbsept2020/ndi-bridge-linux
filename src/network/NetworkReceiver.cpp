@@ -1,13 +1,7 @@
 #include "network/NetworkReceiver.h"
 #include "common/Logger.h"
 
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
-#include <poll.h>
 #include <cstring>
-#include <cerrno>
 
 namespace ndi_bridge {
 
@@ -38,27 +32,35 @@ bool NetworkReceiver::startListening(uint16_t port) {
 
     // Create UDP socket
     socket_ = socket(AF_INET, SOCK_DGRAM, 0);
-    if (socket_ < 0) {
-        Logger::instance().errorf("Failed to create socket: %s", strerror(errno));
+    if (socket_ == INVALID_SOCKET_VAL) {
+        int err = platform_socket_errno();
+        Logger::instance().errorf("Failed to create socket: %s", platform_socket_strerror(err));
         if (onError_) {
-            onError_(std::string("Failed to create socket: ") + strerror(errno));
+            onError_(std::string("Failed to create socket: ") + platform_socket_strerror(err));
         }
         return false;
     }
 
     // Set socket options
     int optval = 1;
-    setsockopt(socket_, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
-    setsockopt(socket_, SOL_SOCKET, SO_REUSEPORT, &optval, sizeof(optval));
+    setsockopt(socket_, SOL_SOCKET, SO_REUSEADDR,
+               reinterpret_cast<const char*>(&optval), sizeof(optval));
+
+#if PLATFORM_HAS_REUSEPORT
+    setsockopt(socket_, SOL_SOCKET, SO_REUSEPORT,
+               reinterpret_cast<const char*>(&optval), sizeof(optval));
+#endif
 
     // Increase receive buffer size for better throughput
     int recvbuf = static_cast<int>(config_.recvBufferSize);
-    setsockopt(socket_, SOL_SOCKET, SO_RCVBUF, &recvbuf, sizeof(recvbuf));
+    setsockopt(socket_, SOL_SOCKET, SO_RCVBUF,
+               reinterpret_cast<const char*>(&recvbuf), sizeof(recvbuf));
 
     // Log actual buffer size granted by kernel
     int actualBuf = 0;
     socklen_t optLen = sizeof(actualBuf);
-    getsockopt(socket_, SOL_SOCKET, SO_RCVBUF, &actualBuf, &optLen);
+    getsockopt(socket_, SOL_SOCKET, SO_RCVBUF,
+               reinterpret_cast<char*>(&actualBuf), &optLen);
     Logger::instance().debugf("UDP recv buffer: requested=%dMB actual=%dMB",
         recvbuf / (1024*1024), actualBuf / (1024*1024));
 
@@ -69,11 +71,12 @@ bool NetworkReceiver::startListening(uint16_t port) {
     addr.sin_addr.s_addr = INADDR_ANY;
 
     if (bind(socket_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
-        Logger::instance().errorf("Failed to bind to port %u: %s", port, strerror(errno));
-        close(socket_);
-        socket_ = -1;
+        int err = platform_socket_errno();
+        Logger::instance().errorf("Failed to bind to port %u: %s", port, platform_socket_strerror(err));
+        platform_close_socket(socket_);
+        socket_ = INVALID_SOCKET_VAL;
         if (onError_) {
-            onError_(std::string("Failed to bind: ") + strerror(errno));
+            onError_(std::string("Failed to bind: ") + platform_socket_strerror(err));
         }
         return false;
     }
@@ -97,10 +100,15 @@ void NetworkReceiver::stop() {
     shouldStop_ = true;
 
     // Close socket to unblock recvfrom
-    if (socket_ >= 0) {
+    if (socket_ != INVALID_SOCKET_VAL) {
+#ifdef _WIN32
+        // On Windows, shutdown may fail on unconnected UDP sockets
+        closesocket(socket_);
+#else
         shutdown(socket_, SHUT_RDWR);
         close(socket_);
-        socket_ = -1;
+#endif
+        socket_ = INVALID_SOCKET_VAL;
     }
 
     // Wait for receive thread
@@ -120,19 +128,24 @@ void NetworkReceiver::receiveLoop() {
     struct sockaddr_in senderAddr{};
     socklen_t senderLen = sizeof(senderAddr);
 
-    // Use poll for timeout-based receive
+    // Use poll/WSAPoll for timeout-based receive
+#ifdef _WIN32
+    WSAPOLLFD pfd;
+#else
     struct pollfd pfd;
+#endif
     pfd.fd = socket_;
     pfd.events = POLLIN;
 
     while (!shouldStop_) {
         // Poll with 10ms timeout (reduce jitter vs 100ms)
-        int ret = poll(&pfd, 1, 10);
+        int ret = platform_poll(&pfd, 1, 10);
 
         if (ret < 0) {
-            if (errno == EINTR) continue;
+            int err = platform_socket_errno();
+            if (err == PLATFORM_EINTR) continue;
             if (!shouldStop_) {
-                Logger::instance().errorf("Poll error: %s", strerror(errno));
+                Logger::instance().errorf("Poll error: %s", platform_socket_strerror(err));
             }
             break;
         }
@@ -146,13 +159,20 @@ void NetworkReceiver::receiveLoop() {
             continue;
         }
 
+#ifdef _WIN32
+        int received = recvfrom(socket_, reinterpret_cast<char*>(buffer.data()),
+                                static_cast<int>(buffer.size()), 0,
+                                reinterpret_cast<struct sockaddr*>(&senderAddr), &senderLen);
+#else
         ssize_t received = recvfrom(socket_, buffer.data(), buffer.size(), 0,
                                     reinterpret_cast<struct sockaddr*>(&senderAddr), &senderLen);
+#endif
 
         if (received < 0) {
-            if (errno == EINTR || errno == EAGAIN) continue;
+            int err = platform_socket_errno();
+            if (err == PLATFORM_EINTR || err == PLATFORM_EAGAIN) continue;
             if (!shouldStop_) {
-                Logger::instance().errorf("Receive error: %s", strerror(errno));
+                Logger::instance().errorf("Receive error: %s", platform_socket_strerror(err));
             }
             break;
         }
@@ -202,9 +222,6 @@ void NetworkReceiver::processPacket(const uint8_t* data, size_t size, uint64_t r
         return;
     }
 
-    // Debug: uncomment to see all packets
-    // Logger::instance().debugf("Packet: %s", Protocol::describe(header).c_str());
-
     // Get payload
     const uint8_t* payload = data + HEADER_SIZE;
     size_t payloadSize = size - HEADER_SIZE;
@@ -213,14 +230,6 @@ void NetworkReceiver::processPacket(const uint8_t* data, size_t size, uint64_t r
     FrameReassembler& reassembler = header.isVideo() ? videoReassembler_ : audioReassembler_;
 
     auto frameOpt = reassembler.addPacket(header, payload, payloadSize);
-
-    // Debug: uncomment to see fragment progress
-    // if (!frameOpt) {
-    //     auto stats = reassembler.getStats();
-    //     Logger::instance().debugf("Fragment %u/%u received for seq %u",
-    //                               header.fragmentIndex + 1, header.fragmentCount,
-    //                               header.sequenceNumber);
-    // }
 
     if (frameOpt) {
         const auto& frame = *frameOpt;

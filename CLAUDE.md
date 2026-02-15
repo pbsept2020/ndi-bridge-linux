@@ -17,6 +17,7 @@ utiliser VideoToolbox sur Mac via le codec `h264_videotoolbox`. Donc le C++ couv
 1. **Mac support** — n'existe pas chez NewTek
 2. **Cloud/headless** — CLI scriptable, déployable sur EC2 sans écran
 3. **Contrôle** — bitrate, codec, port, buffer exposés (vs boîte noire NewTek)
+4. **Métrologie broadcast** — métriques interprétables directement en frames (latence, drops, décodage), grâce à une chaîne d'horloges synchronisées (chrony). Voir § "Métrologie broadcast" ci-dessous
 
 **Décision : PAS de WSL2 pour Windows.** Le C++ compile nativement sur Windows
 (WinSock au lieu de POSIX sockets, quelques `#ifdef _WIN32`). WSL2 ajoute de la
@@ -32,20 +33,24 @@ serveur web intégré au binaire (`ndi-bridge --web-ui` → localhost:8080).
 - Le Join peut tourner sur : VM Parallels, serveur cloud, EC2, PC Windows
 - **Les deux modes sont cross-platform**, le code est le même
 - Seule différence par plateforme : le choix de l'encodeur FFmpeg
-  - Mac : `h264_videotoolbox` (hardware, à implémenter)
-  - Windows : `h264_qsv` ou `h264_nvenc` (hardware, futur)
+  - Mac : `h264_videotoolbox` (hardware, **FAIT** v2.0)
+  - Windows : `h264_nvenc` (NVIDIA GPU) ou `h264_qsv` (Intel) avec fallback libx264 (**FAIT** v2.1)
   - Linux/fallback : `libx264` (software, actuel)
 
-### Port Windows — ce qu'il faut changer
+### Port Windows — **FAIT** (v2.1)
 
-Le port Windows est minimal. Modifications nécessaires :
+Le port Windows est dans `src/common/Platform.h` qui abstrait les différences :
 ```
-POSIX socket()      → WinSock WSAStartup() + socket()
-poll()              → WSAPoll()
-close(fd)           → closesocket(fd)
-#include <unistd.h> → #ifdef _WIN32 conditionnel
+POSIX socket()      → WinSock WSAStartup() + socket()    (Platform.h)
+poll()              → WSAPoll()                            (platform_poll())
+close(fd)           → closesocket(fd)                      (platform_close_socket())
+__builtin_bswap     → _byteswap (MSVC)                    (platform::bswap*)
+clock_gettime       → GetSystemTimePreciseAsFileTime       (platform::wallClockNs())
+fcntl O_NONBLOCK    → ioctlsocket FIONBIO                  (platform_set_nonblocking())
+errno/strerror      → WSAGetLastError/FormatMessage         (platform_socket_errno/strerror())
 ```
 Tout le reste (FFmpeg, NDI SDK, Protocol, Video*, JoinMode, HostMode) compile tel quel.
+CMakeLists.txt ajoute `ws2_32` sur Windows. FindNDI.cmake cherche le SDK Windows.
 
 ### Zones d'ombre non adressées
 
@@ -63,7 +68,7 @@ Tout le reste (FFmpeg, NDI SDK, Protocol, Video*, JoinMode, HostMode) compile te
 2. ~~Encodage async (thread dédié)~~ — **FAIT** (v2.0, queue bornée 3 frames)
 3. ~~Fix exclude pattern~~ — **FAIT** (v2.0, --source bypasse le filtre)
 4. Retester performance EC2→Mac avec hwaccel + async
-5. Port Windows (ajouter `#ifdef _WIN32` dans Network*)
+5. ~~Port Windows (ajouter `#ifdef _WIN32` dans Network*)~~ — **FAIT** (v2.1, Platform.h + NVENC + CMake)
 6. Deprecate ndi-bridge-mac (Swift) une fois le C++ complet
 
 ### Viewers
@@ -343,7 +348,7 @@ au lieu de parser et envoyer chaque NAL unit séparément.
 units individuellement au lieu du frame complet.
 
 ## Version
-Actuelle : v2.0 (15 fév 2026)
+Actuelle : v2.1 (15 fév 2026)
 
 
 La version est définie dans `src/common/Version.h` (macro `NDI_BRIDGE_VERSION`).
@@ -377,7 +382,17 @@ cmake -B build-mac && cmake --build build-mac
 
 # Linux (VM Parallels ARM64)
 cmake -B build && cmake --build build
+
+# Windows (Visual Studio 2022, depuis cmd ou PowerShell)
+cmake -B build -G "Visual Studio 17 2022" && cmake --build build --config Release
 ```
+
+### Pré-requis Windows
+- Visual Studio Build Tools 2022 (ou VS Community)
+- CMake 3.16+
+- FFmpeg avec support NVENC (build pré-compilé gyan.dev ou build custom `--enable-nvenc`)
+- NDI SDK 6 pour Windows (`C:\Program Files\NDI\NDI 6 SDK`)
+- Variable d'environnement `NDI_SDK_DIR` (optionnelle, FindNDI.cmake cherche les paths standard)
 
 ## Test Pattern (ndi-test-pattern)
 
@@ -403,10 +418,12 @@ Options `--ball-color` : green (défaut), red, blue, yellow, cyan, magenta, whit
 - **Validé cross-machine** (15 fév 2026) : bille verte Mac + bille rouge EC2 via bridge,
   delta TC = 3 frames = ~120ms one-way (cohérent avec SpeedFusion RTT 225ms / 2)
 
-## État actuel (v2.0 — 15 fév 2026)
+## État actuel (v2.1 — 15 fév 2026)
 
 ### Ce qui marche
-- **Build cross-platform** : Mac (build-mac/) et Linux (build/) depuis le même codebase C++
+- **Build cross-platform** : Mac (build-mac/), Linux (build/) et Windows depuis le même codebase C++
+- **Port Windows** (v2.1) : `Platform.h` abstrait sockets (WinSock), byte-swap (MSVC), wall clock (GetSystemTimePreciseAsFileTime), non-blocking mode (ioctlsocket). CMake ajoute ws2_32 et cherche le NDI SDK Windows
+- **NVENC hardware encoding** (v2.1) : sur Windows avec GPU NVIDIA, `h264_nvenc` (preset p4, tune ll, zerolatency) avec fallback `h264_qsv` (Intel) puis `libx264` (software)
 - **Encodage async** (v2.0) : thread dédié pour l'encodage H.264, découplé du thread NDI recv. Queue bornée (3 frames, drop-oldest). Le host peut maintenant recevoir à 25fps sans blocage par l'encodeur
 - **VideoToolbox hardware encoding** (v2.0) : sur macOS, `h264_videotoolbox` (~1-5ms par frame) avec fallback automatique vers `libx264` (~60-100ms). Le gain combiné async+hwaccel = host Mac à 25fps stable
 - **VideoToolbox hardware decoding** (v2.0) : sur macOS, décodage GPU via `av_hwframe_transfer_data()` avec fallback software
@@ -445,14 +462,30 @@ Options `--ball-color` : green (défaut), red, blue, yellow, cyan, magenta, whit
 - Déployé : ndi-bridge-linux compilé, NDI SDK Linux 6, libltc-dev
 - **Instance ltc-ndi-source (i-01a2f7179d76c22c2) TERMINÉE** le 15 fév — ancienne instance spot qui floodait le port 5990 avec des paquets 38 bytes (ancien protocole)
 
-#### Return (vmix-frankfurt) — host EC2→Mac retour
-- Instance : vmix-frankfurt
+#### Return (Vmix1-frankfurt) — host EC2→Mac retour avec GPU
+- Instance : Vmix1-frankfurt (i-0a9313dae0af02d4b)
+- Type : **g6.xlarge** — NVIDIA L4 GPU (h264_nvenc, **av1_nvenc** disponible)
+- OS : **Windows Server**
+- IP publique : 63.181.214.196 (quand démarrée — l'instance est normalement stoppée)
+- IP privée VPC : 172.31.41.28
+- Accès : DCV viewer via Tailscale (pas RDP)
+- Même VPC et SG que ltc-ndi-test (sg-0761c1bb83aecc17a)
+- Accès : **DCV viewer via Tailscale** (pas RDP, pas SSH)
+- Démarrer : `aws ec2 start-instances --instance-ids i-0a9313dae0af02d4b`
+- Arrêter : `aws ec2 stop-instances --instance-ids i-0a9313dae0af02d4b`
+- **Coût : ~$0.70-1.00/h on-demand** — toujours arrêter après usage
+
+**⚠️ ERREUR CORRIGÉE (v2.1)** : l'ancienne doc mentionnait "vmix-frankfurt" à 18.156.120.21 avec clé SSH `vmix-frankfurt-key.pem`. Cette instance est en réalité `ndi-bridge-ec2-bis` (Linux t3.medium, PAS de GPU). La vraie machine vMix/GPU est Vmix1-frankfurt ci-dessus.
+
+#### ndi-bridge-ec2-bis (anciennement "vmix-frankfurt" dans la doc)
+- Instance : ndi-bridge-ec2-bis (Linux t3.medium, PAS de GPU)
 - IP publique : 18.156.120.21
 - Clé SSH : `~/.secrets/aws/vmix-frankfurt-key.pem`
 - User : ubuntu
 - Commande : `ssh -i ~/.secrets/aws/vmix-frankfurt-key.pem ubuntu@18.156.120.21`
+- **Ne pas utiliser pour le retour Frankfurt** — pas de GPU, x264 trop lent pour 1080p (47% qdrop)
 
-**⚠️ Les deux instances utilisent des clés SSH DIFFÉRENTES. Ne pas intervertir.**
+**⚠️ Les instances ltc-ndi-test et ndi-bridge-ec2-bis utilisent des clés SSH DIFFÉRENTES. Ne pas intervertir.**
 
 ### SpeedFusion VPN (Balance 20 ↔ FusionHub AWS)
 - Le tunnel SpeedFusion relie le LAN Peplink (192.168.1.x) au VPC AWS (172.31.x.x)
@@ -525,13 +558,15 @@ Utiliser deploy-vm.sh (mis à jour pour EC2) :
 - EC2 → Mac : utiliser IP LAN Peplink (192.168.1.9) via SpeedFusion — PAS l'IP publique (NAT bloque)
 
 ### Prochaines étapes
-1. **Retester performance retour EC2→Mac** — avec hwaccel decode + async encode (v2.0), les qdrop devraient baisser
-2. **Calibration NTP optionnelle** — échange ping/pong au démarrage pour soustraire l'offset NTP résiduel du delta sendTimestamp
-3. **Port Windows** (ajouter `#ifdef _WIN32` dans Network*)
+1. **Compiler et tester sur Vmix1-frankfurt** (Windows g6.xlarge NVIDIA L4) — installer VS Build Tools, CMake, FFmpeg (avec NVENC + AV1), NDI SDK Windows
+2. **Tester round-trip via Vmix1** — Mac→Vmix1 (join+host NVENC)→Mac, mesurer qdrop et latence
+3. **Retester performance retour EC2→Mac** — avec hwaccel decode + async encode (v2.0), les qdrop devraient baisser
+4. **Calibration NTP optionnelle** — échange ping/pong au démarrage pour soustraire l'offset NTP résiduel du delta sendTimestamp
+5. **Support AV1** (futur) — le L4 a `av1_nvenc` hardware. Nécessite : champ codec dans le header protocole (actuellement implicitement H.264), décodeur AV1 côté join (libdav1d ou VideoToolbox AV1 sur macOS 14+), format OBU au lieu d'Annex-B. Gain attendu : meilleure qualité à débit égal ou débit réduit sur le lien WAN
 
 ## Protocole
 
-UDP, header **46 bytes** Big-Endian, compatible cross-platform Mac/Linux.
+UDP, header **46 bytes** Big-Endian, compatible cross-platform Mac/Linux/Windows.
 Video : H.264 Annex-B. Audio : PCM float32 planar.
 MTU : 1400 bytes. MAX_UDP_PAYLOAD = 1354 bytes (1400 - 46).
 
@@ -580,6 +615,49 @@ le biais NTP est < 2ms → le delta est une bonne approximation de la latence on
 
 Le deserialize accepte les paquets >= 38 bytes (ancien header) et lit sendTimestamp
 uniquement si >= 46 bytes (sinon 0). `LEGACY_HEADER_SIZE = 38` est défini dans Protocol.h.
+
+## Métrologie broadcast — pourquoi nos métriques ont de la valeur
+
+**Ne pas banaliser.** Les métriques du bridge (latence, drops, decode_ms) ne sont pas de simples chiffres de debug IT. Ce sont des **mesures broadcast interprétables directement en frames** parce que toute la chaîne de métrologie est correcte. Retirer un seul maillon rend les chiffres inutilisables.
+
+### La chaîne complète (chaque maillon est nécessaire)
+
+```
+ChronyControl Mac (< 1ms vs UTC)  ─┐
+                                    ├─→ sendTimestamp delta = latence réseau réelle
+chrony EC2 (< 0.01ms vs UTC)       ┘      173-208ms (mesurable, stable, interprétable)
+```
+
+1. **ChronyControl Mac** (< 1ms) — horloge de départ fiable. Contribution de Pierre : a identifié que `timed` Apple avait +612ms de dérive et installé ChronyControl
+2. **chrony EC2** (< 0.01ms) — horloge d'arrivée fiable (Amazon Time Sync)
+3. **`CLOCK_REALTIME` dans `wallClockNs()`** — mesure au bon endroit (juste avant `sendto()`)
+4. **Header 46 bytes** — le timestamp voyage avec le paquet (pas de corrélation externe)
+5. **Mesure sur fragment 0** — on mesure le début de la frame, pas la fin
+6. **Test pattern UTC-déterministe** — la bille ET le TC sont des références visuelles indépendantes qui confirment les chiffres numériques
+
+### Traduction directe en frames (25fps = 40ms/frame)
+
+| Métrique | Valeur | Signification broadcast |
+|----------|--------|------------------------|
+| Latence one-way | 190ms | **4.75 frames** — visible à l'œil sur le multiviewer (décalage bille verte/rouge) |
+| Précision NTP | < 2ms | **< 0.05 frame** — invisible, n'affecte pas la lecture |
+| decode_ms | 8.4ms | **0.21 frame** — le décodeur est instantané en termes broadcast |
+| dropped 0.007% | 10/142671 | 10 frames perdues en 93 min — **indétectable** à l'œil |
+
+Ces chiffres permettent de rédiger un cahier des charges broadcast : "le bridge ajoute ~5 frames de latence" (compréhensible par un réalisateur), "le taux de perte est < 1 frame/10 min" (acceptable pour du monitoring, pas pour de la master).
+
+### Contre-exemple : sans chrony (ancien `timed` Apple)
+
+```
+sendTimestamp delta = latence réseau (190ms) + dérive NTP (~200-600ms, variable)
+                    = 390-790ms ← INUTILISABLE
+```
+
+La dérive de `timed` était **3x plus grande** que la latence mesurée. C'est comme mesurer une distance de 19cm avec une règle qui bouge de 60cm aléatoirement. On aurait eu "ça marche à peu près" au lieu de "190ms ± 17ms one-way".
+
+### Biais IT à éviter
+
+Ne pas traiter chrony comme "un prérequis d'installation banal". En broadcast, le timing est le **produit** — la précision temporelle est ce qui fait qu'un signal est utilisable ou non. ChronyControl sur Mac n'est pas un fix d'infra, c'est ce qui fait passer le bridge de "jouet IT qui envoie de la vidéo" à "outil avec des métriques broadcast interprétables".
 
 ## Horloges et timecodes — LIRE AVANT DE TOUCHER
 

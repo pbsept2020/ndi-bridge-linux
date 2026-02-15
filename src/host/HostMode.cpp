@@ -46,6 +46,11 @@ int HostMode::start(std::atomic<bool>& running) {
     // Step 1: Initialize NDI Receiver
     log.info("Step 1/5: Initializing NDI receiver...");
     ndiReceiver_ = std::make_unique<NDIReceiver>();
+    {
+        NDIReceiverConfig recvConfig;
+        recvConfig.preferBGRA = false;  // UYVY = half the bandwidth (4.1 MB/frame vs 8.3 MB)
+        ndiReceiver_->configure(recvConfig);
+    }
 
     if (!NDIReceiver::initializeNDI()) {
         LOG_ERROR("Failed to initialize NDI SDK");
@@ -53,8 +58,8 @@ int HostMode::start(std::atomic<bool>& running) {
     }
 
     // Configure callbacks
-    ndiReceiver_->setOnVideoFrame([this](const NDIVideoFrame& frame) {
-        onVideoFrame(frame);
+    ndiReceiver_->setOnVideoFrame([this](NDIVideoFrame frame) {
+        onVideoFrame(std::move(frame));
     });
     ndiReceiver_->setOnAudioFrame([this](const NDIAudioFrame& frame) {
         onAudioFrame(frame);
@@ -238,7 +243,7 @@ HostMode::Stats HostMode::getStats() const {
 // Callbacks
 // ============================================================================
 
-void HostMode::onVideoFrame(const NDIVideoFrame& frame) {
+void HostMode::onVideoFrame(NDIVideoFrame frame) {
     videoFramesReceived_++;
 
     // Push frame into async encode queue (drop-oldest if full)
@@ -248,7 +253,7 @@ void HostMode::onVideoFrame(const NDIVideoFrame& frame) {
             frameQueue_.pop();
             videoFramesDropped_++;
         }
-        frameQueue_.push(frame);
+        frameQueue_.push(std::move(frame));
     }
     queueCv_.notify_one();
 }
