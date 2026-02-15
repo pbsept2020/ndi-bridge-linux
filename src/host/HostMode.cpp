@@ -187,10 +187,11 @@ int HostMode::start(std::atomic<bool>& running) {
 }
 
 void HostMode::stop() {
-    if (!running_) return;
+    // Atomic CAS: only ONE thread enters the stop logic (prevents double-join crash)
+    bool expected = true;
+    if (!running_.compare_exchange_strong(expected, false)) return;
 
     LOG_INFO("Stopping Host Mode...");
-    running_ = false;
 
     // Wake up encode thread so it can exit
     queueCv_.notify_all();

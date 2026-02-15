@@ -197,10 +197,11 @@ int JoinMode::start(std::atomic<bool>& running) {
 }
 
 void JoinMode::stop() {
-    if (!running_) return;
+    // Atomic CAS: only ONE thread enters the stop logic (prevents double-join crash)
+    bool expected = true;
+    if (!running_.compare_exchange_strong(expected, false)) return;
 
     LOG_INFO("Stopping Join Mode...");
-    running_ = false;
 
     // Stop buffer thread
     if (bufferRunning_) {
