@@ -68,11 +68,26 @@ bool VideoEncoder::configure(const VideoEncoderConfig& config) {
 }
 
 bool VideoEncoder::initEncoder() {
-    // Find libx264 encoder
-    const AVCodec* codec = avcodec_find_encoder_by_name("libx264");
+    const AVCodec* codec = nullptr;
+    hwAccelActive_ = false;
+
+#ifdef __APPLE__
+    // Try VideoToolbox hardware encoder first on macOS
+    if (config_.useHardwareAccel) {
+        codec = avcodec_find_encoder_by_name("h264_videotoolbox");
+        if (codec) {
+            Logger::instance().info("Trying hardware encoder: h264_videotoolbox");
+            hwAccelActive_ = true;
+        }
+    }
+#endif
+
     if (!codec) {
-        // Fallback to default H.264 encoder
-        codec = avcodec_find_encoder(AV_CODEC_ID_H264);
+        // Fall back to libx264 software encoder
+        codec = avcodec_find_encoder_by_name("libx264");
+        if (!codec) {
+            codec = avcodec_find_encoder(AV_CODEC_ID_H264);
+        }
     }
 
     if (!codec) {
@@ -90,56 +105,106 @@ bool VideoEncoder::initEncoder() {
         return false;
     }
 
-    // Configure codec
+    // Configure codec — common settings
     codecCtx_->width = config_.width;
     codecCtx_->height = config_.height;
     codecCtx_->time_base = AVRational{1, static_cast<int>(TIMESTAMP_RESOLUTION)};  // 10M ticks/sec
     codecCtx_->framerate = AVRational{config_.fps, 1};
-    codecCtx_->pix_fmt = AV_PIX_FMT_YUV420P;  // x264 prefers YUV420P
     codecCtx_->color_range = AVCOL_RANGE_JPEG;  // Full range (0-255) — NDI is full range
     codecCtx_->colorspace = AVCOL_SPC_BT709;
     codecCtx_->color_primaries = AVCOL_PRI_BT709;
     codecCtx_->color_trc = AVCOL_TRC_BT709;
     codecCtx_->bit_rate = config_.bitrate;
-    codecCtx_->rc_max_rate = config_.bitrate * 3 / 2;  // Peak = 1.5x average
-    codecCtx_->rc_buffer_size = config_.bitrate / config_.fps;  // 1 frame buffer (match VideoToolbox)
     codecCtx_->gop_size = config_.keyframeInterval;
-    codecCtx_->max_b_frames = 0;                       // No B-frames for low latency
-    codecCtx_->thread_count = 0;                       // Auto-detect threads
-
-    // Set global header flag for Annex-B output
-    // We'll handle SPS/PPS manually for each keyframe
+    codecCtx_->max_b_frames = 0;  // No B-frames for low latency
     codecCtx_->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 
-    // x264 specific options
     AVDictionary* opts = nullptr;
-    av_dict_set(&opts, "preset", config_.preset.c_str(), 0);
-    av_dict_set(&opts, "tune", config_.tune.c_str(), 0);
-    av_dict_set(&opts, "profile", config_.profile.c_str(), 0);
+    int ret;
 
-    // Additional low-latency options (match Mac's MaxFrameDelayCount=0)
-    av_dict_set(&opts, "colorprim", "bt709", 0);
-    av_dict_set(&opts, "transfer", "bt709", 0);
-    av_dict_set(&opts, "colormatrix", "bt709", 0);
-    av_dict_set(&opts, "fullrange", "on", 0);  // Force full range (0-255)
-    av_dict_set(&opts, "rc-lookahead", "0", 0);
-    av_dict_set(&opts, "sync-lookahead", "0", 0);
-    // NOTE: Do NOT set sliced-threads=0 here — tune=zerolatency enables
-    // sliced-threads=1 which gives multi-thread performance with ZERO added
-    // frame latency. Disabling it forces frame-level threading that adds
-    // N-1 frames of buffering delay (was the cause of ~100ms extra latency).
+    if (hwAccelActive_) {
+        // VideoToolbox settings
+        codecCtx_->pix_fmt = AV_PIX_FMT_NV12;  // VideoToolbox prefers NV12
+        av_dict_set(&opts, "realtime", "1", 0);
+        av_dict_set(&opts, "allow_sw", "1", 0);  // Fall back to software if HW unavailable
+        av_dict_set(&opts, "profile", "high", 0);
+        av_dict_set(&opts, "level", "4.1", 0);
 
-    // Open codec
-    int ret = avcodec_open2(codecCtx_, codec, &opts);
-    av_dict_free(&opts);
+        ret = avcodec_open2(codecCtx_, codec, &opts);
+        av_dict_free(&opts);
 
-    if (ret < 0) {
-        char errbuf[256];
-        av_strerror(ret, errbuf, sizeof(errbuf));
-        Logger::instance().errorf("Failed to open encoder: %s", errbuf);
-        if (onError_) onError_(std::string("Failed to open encoder: ") + errbuf);
-        return false;
+        if (ret < 0) {
+            // VideoToolbox failed — fall back to libx264
+            char errbuf[256];
+            av_strerror(ret, errbuf, sizeof(errbuf));
+            Logger::instance().infof("VideoToolbox failed (%s), falling back to libx264", errbuf);
+
+            avcodec_free_context(&codecCtx_);
+            hwAccelActive_ = false;
+
+            codec = avcodec_find_encoder_by_name("libx264");
+            if (!codec) codec = avcodec_find_encoder(AV_CODEC_ID_H264);
+            if (!codec) {
+                LOG_ERROR("H.264 encoder not found (fallback)");
+                return false;
+            }
+
+            codecCtx_ = avcodec_alloc_context3(codec);
+            if (!codecCtx_) return false;
+
+            // Re-apply common settings
+            codecCtx_->width = config_.width;
+            codecCtx_->height = config_.height;
+            codecCtx_->time_base = AVRational{1, static_cast<int>(TIMESTAMP_RESOLUTION)};
+            codecCtx_->framerate = AVRational{config_.fps, 1};
+            codecCtx_->color_range = AVCOL_RANGE_JPEG;
+            codecCtx_->colorspace = AVCOL_SPC_BT709;
+            codecCtx_->color_primaries = AVCOL_PRI_BT709;
+            codecCtx_->color_trc = AVCOL_TRC_BT709;
+            codecCtx_->bit_rate = config_.bitrate;
+            codecCtx_->gop_size = config_.keyframeInterval;
+            codecCtx_->max_b_frames = 0;
+            codecCtx_->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+            // Fall through to x264 setup below
+        }
     }
+
+    if (!hwAccelActive_) {
+        // libx264 settings
+        codecCtx_->pix_fmt = AV_PIX_FMT_YUV420P;
+        codecCtx_->rc_max_rate = config_.bitrate * 3 / 2;
+        codecCtx_->rc_buffer_size = config_.bitrate / config_.fps;
+        codecCtx_->thread_count = 0;
+
+        opts = nullptr;
+        av_dict_set(&opts, "preset", config_.preset.c_str(), 0);
+        av_dict_set(&opts, "tune", config_.tune.c_str(), 0);
+        av_dict_set(&opts, "profile", config_.profile.c_str(), 0);
+        av_dict_set(&opts, "colorprim", "bt709", 0);
+        av_dict_set(&opts, "transfer", "bt709", 0);
+        av_dict_set(&opts, "colormatrix", "bt709", 0);
+        av_dict_set(&opts, "fullrange", "on", 0);
+        av_dict_set(&opts, "rc-lookahead", "0", 0);
+        av_dict_set(&opts, "sync-lookahead", "0", 0);
+        // NOTE: Do NOT set sliced-threads=0 here — tune=zerolatency enables
+        // sliced-threads=1 which gives multi-thread performance with ZERO added
+        // frame latency. Disabling it forces frame-level threading that adds
+        // N-1 frames of buffering delay.
+
+        ret = avcodec_open2(codecCtx_, codec, &opts);
+        av_dict_free(&opts);
+
+        if (ret < 0) {
+            char errbuf[256];
+            av_strerror(ret, errbuf, sizeof(errbuf));
+            Logger::instance().errorf("Failed to open encoder: %s", errbuf);
+            if (onError_) onError_(std::string("Failed to open encoder: ") + errbuf);
+            return false;
+        }
+    }
+
+    Logger::instance().successf("Encoder opened: %s (%s)", codec->name,
+                                 hwAccelActive_ ? "hardware" : "software");
 
     // Allocate frame for input
     frame_ = av_frame_alloc();
@@ -170,16 +235,17 @@ bool VideoEncoder::initEncoder() {
 
 bool VideoEncoder::initScaler() {
     AVPixelFormat srcFormat = toAVPixelFormat(config_.inputFormat);
-    AVPixelFormat dstFormat = AV_PIX_FMT_YUV420P;
+    AVPixelFormat dstFormat = codecCtx_->pix_fmt;  // NV12 for VideoToolbox, YUV420P for x264
 
-    // If input is already YUV420P, no scaling needed
+    // If input matches encoder format, no scaling needed
     if (srcFormat == dstFormat) {
         LOG_DEBUG("No pixel format conversion needed");
         return true;
     }
 
-    Logger::instance().debugf("Creating scaler: %s -> YUV420P",
-                              pixelFormatName(config_.inputFormat));
+    Logger::instance().debugf("Creating scaler: %s -> %s",
+                              pixelFormatName(config_.inputFormat),
+                              av_get_pix_fmt_name(dstFormat));
 
     swsCtx_ = sws_getContext(
         config_.width, config_.height, srcFormat,
@@ -239,6 +305,7 @@ void VideoEncoder::cleanup() {
     }
 
     configured_ = false;
+    hwAccelActive_ = false;
     frameNumber_ = 0;
     stats_ = Stats{};
 }

@@ -354,7 +354,22 @@ void HostMode::onNDIError(const std::string& error) {
 // ============================================================================
 
 NDISource HostMode::selectSource(const std::vector<NDISource>& sources) {
-    // Filter out excluded patterns
+    // Explicit --source bypasses exclude patterns entirely
+    if (!config_.sourceName.empty()) {
+        for (const auto& src : sources) {
+            if (src.name.find(config_.sourceName) != std::string::npos) {
+                return src;
+            }
+        }
+        Logger::instance().errorf("Source '%s' not found", config_.sourceName.c_str());
+        Logger::instance().info("Available sources:");
+        for (const auto& src : sources) {
+            Logger::instance().infof("  - %s", src.name.c_str());
+        }
+        return NDISource{};
+    }
+
+    // Filter out excluded patterns (only for auto/interactive selection)
     std::vector<NDISource> filtered;
     for (const auto& src : sources) {
         if (!matchesExcludePattern(src.name)) {
@@ -365,21 +380,6 @@ NDISource HostMode::selectSource(const std::vector<NDISource>& sources) {
     if (filtered.empty()) {
         LOG_ERROR("All sources filtered out by exclude patterns");
         Logger::instance().info("Available sources before filtering:");
-        for (const auto& src : sources) {
-            Logger::instance().infof("  - %s", src.name.c_str());
-        }
-        return NDISource{};
-    }
-
-    // Specific source name requested?
-    if (!config_.sourceName.empty()) {
-        for (const auto& src : sources) {  // Search in all sources, not just filtered
-            if (src.name.find(config_.sourceName) != std::string::npos) {
-                return src;
-            }
-        }
-        Logger::instance().errorf("Source '%s' not found", config_.sourceName.c_str());
-        Logger::instance().info("Available sources:");
         for (const auto& src : sources) {
             Logger::instance().infof("  - %s", src.name.c_str());
         }

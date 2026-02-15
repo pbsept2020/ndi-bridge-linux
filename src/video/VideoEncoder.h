@@ -42,10 +42,13 @@ struct VideoEncoderConfig {
     int keyframeInterval = 60;      // Keyframe every N frames (1 second at 60fps)
     PixelFormat inputFormat = PixelFormat::UYVY;
 
-    // x264 specific
+    // x264 specific (ignored for hardware encoders)
     std::string preset = "ultrafast";
     std::string tune = "zerolatency";
     std::string profile = "high";
+
+    // Hardware acceleration
+    bool useHardwareAccel = true;   // Try hardware encoder first (VideoToolbox on macOS)
 
     // Presets
     static VideoEncoderConfig hd1080p60() {
@@ -165,6 +168,7 @@ private:
     VideoEncoderConfig config_;
     bool configured_ = false;
     bool forceNextKeyframe_ = false;
+    bool hwAccelActive_ = false;
     uint64_t frameNumber_ = 0;
 
     // FFmpeg contexts
