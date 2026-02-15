@@ -83,5 +83,5 @@ cmake --build build --config Release
 Pop-Location
 
 Write-Host "`n=== DONE ===" -ForegroundColor Green
-Write-Host "Binary: $repoDir\build\Release\ndi-bridge.exe" -ForegroundColor Cyan
-Write-Host "Test:   .\build\Release\ndi-bridge.exe join --name `"Test`" --port 5990 -v" -ForegroundColor Cyan
+Write-Host "Binary: $repoDir\build\Release\ndi-bridge-x.exe" -ForegroundColor Cyan
+Write-Host "Test:   .\build\Release\ndi-bridge-x.exe join --name `"Test`" --port 5990 -v" -ForegroundColor Cyan

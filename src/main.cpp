@@ -85,7 +85,7 @@ struct Config {
 
 void printUsage(const char* programName) {
     std::cout << "\n"
-        "NDI Bridge Linux - Stream NDI over WAN\n"
+        "NDI Bridge X - Cross-platform NDI over WAN\n"
         "\n"
         "Usage:\n"
         "  " << programName << " <mode> [options]\n"

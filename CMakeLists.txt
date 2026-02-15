@@ -159,31 +159,31 @@ if(APPLE AND NDI_LIBRARY_DIR)
 endif()
 
 # --- Main Executable ---
-add_executable(ndi-bridge
+add_executable(ndi-bridge-x
     src/main.cpp
 )
 
-target_link_libraries(ndi-bridge PRIVATE
+target_link_libraries(ndi-bridge-x PRIVATE
     ndi_bridge_common
     ${NDI_LIBRARIES}
     Threads::Threads
 )
 
 if(APPLE)
-    target_link_libraries(ndi-bridge PRIVATE
+    target_link_libraries(ndi-bridge-x PRIVATE
         "-framework CoreFoundation"
         "-framework VideoToolbox"
         "-framework CoreMedia"
     )
 endif()
 
-target_include_directories(ndi-bridge PRIVATE
+target_include_directories(ndi-bridge-x PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${NDI_INCLUDE_DIRS}
 )
 
 if(NDI_LIBRARY_DIRS)
-    target_link_directories(ndi-bridge PRIVATE ${NDI_LIBRARY_DIRS})
+    target_link_directories(ndi-bridge-x PRIVATE ${NDI_LIBRARY_DIRS})
 endif()
 
 # --- Test Executables ---
@@ -286,7 +286,7 @@ if(LTC_FOUND)
 endif()
 
 # --- Install ---
-install(TARGETS ndi-bridge RUNTIME DESTINATION bin)
+install(TARGETS ndi-bridge-x RUNTIME DESTINATION bin)
 
 # --- Summary ---
 message(STATUS "")
