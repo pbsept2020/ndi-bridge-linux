@@ -117,6 +117,9 @@ int HostMode::start(std::atomic<bool>& running) {
     running_ = true;
     startTime_ = std::chrono::steady_clock::now();
 
+    // Start async encode thread (must be before startReceiving)
+    encodeThread_ = std::thread(&HostMode::encodeLoop, this);
+
     ndiReceiver_->startReceiving();
 
     log.success("═══════════════════════════════════════════════════════");
@@ -146,10 +149,11 @@ int HostMode::start(std::atomic<bool>& running) {
             lastStats = now;
             auto stats = getStats();
             auto senderStats = networkSender_ ? networkSender_->getStats() : NetworkSenderStats{};
-            log.debugf("Stats: video=%lu audio=%lu encoded=%lu pkts_sent=%lu eagain_drops=%lu sent=%.2fMB time=%.1fs",
+            log.debugf("Stats: video=%lu audio=%lu encoded=%lu qdrop=%lu pkts_sent=%lu eagain_drops=%lu sent=%.2fMB time=%.1fs",
                       stats.videoFramesReceived,
                       stats.audioFramesReceived,
                       stats.videoFramesEncoded,
+                      stats.videoFramesDropped,
                       senderStats.packetsSent,
                       senderStats.packetsDroppedEagain,
                       stats.bytesSent / (1024.0 * 1024.0),
@@ -165,8 +169,9 @@ int HostMode::start(std::atomic<bool>& running) {
     log.success("═══════════════════════════════════════════════════════");
     log.success("HOST MODE STOPPED");
     log.successf("Duration: %.1f seconds", finalStats.runTimeSeconds);
-    log.successf("Video: %lu received, %lu encoded",
-                 finalStats.videoFramesReceived, finalStats.videoFramesEncoded);
+    log.successf("Video: %lu received, %lu encoded, %lu qdrop",
+                 finalStats.videoFramesReceived, finalStats.videoFramesEncoded,
+                 finalStats.videoFramesDropped);
     log.successf("Network: %lu packets sent, %lu EAGAIN drops, %.2f MB",
                  finalSenderStats.packetsSent, finalSenderStats.packetsDroppedEagain,
                  finalStats.bytesSent / (1024.0 * 1024.0));
@@ -181,6 +186,12 @@ void HostMode::stop() {
 
     LOG_INFO("Stopping Host Mode...");
     running_ = false;
+
+    // Wake up encode thread so it can exit
+    queueCv_.notify_all();
+    if (encodeThread_.joinable()) {
+        encodeThread_.join();
+    }
 
     if (ndiReceiver_) {
         ndiReceiver_->stopReceiving();
@@ -209,6 +220,7 @@ HostMode::Stats HostMode::getStats() const {
     stats.videoFramesReceived = videoFramesReceived_;
     stats.audioFramesReceived = audioFramesReceived_;
     stats.videoFramesEncoded = videoFramesEncoded_;
+    stats.videoFramesDropped = videoFramesDropped_;
 
     if (networkSender_) {
         stats.bytesSent = networkSender_->getStats().bytesSent;
@@ -229,43 +241,77 @@ HostMode::Stats HostMode::getStats() const {
 void HostMode::onVideoFrame(const NDIVideoFrame& frame) {
     videoFramesReceived_++;
 
-    // Configure encoder on first frame (auto-detect resolution/fps)
-    if (!encoderConfigured_) {
-        VideoEncoderConfig encConfig;
-        encConfig.width = frame.width;
-        encConfig.height = frame.height;
-        encConfig.bitrate = config_.bitrateMbps * 1000000;
+    // Push frame into async encode queue (drop-oldest if full)
+    {
+        std::lock_guard<std::mutex> lock(queueMutex_);
+        if (frameQueue_.size() >= MAX_QUEUE_SIZE) {
+            frameQueue_.pop();
+            videoFramesDropped_++;
+        }
+        frameQueue_.push(frame);
+    }
+    queueCv_.notify_one();
+}
 
-        // Determine framerate
-        if (frame.frameRateD > 0 && frame.frameRateN > 0) {
-            encConfig.fps = frame.frameRateN / frame.frameRateD;
-            encConfig.keyframeInterval = encConfig.fps; // Keyframe every second
+void HostMode::encodeLoop() {
+    LOG_DEBUG("Encode thread started");
+
+    while (running_) {
+        NDIVideoFrame frame;
+
+        // Wait for a frame
+        {
+            std::unique_lock<std::mutex> lock(queueMutex_);
+            queueCv_.wait(lock, [this] {
+                return !frameQueue_.empty() || !running_;
+            });
+
+            if (!running_ && frameQueue_.empty()) break;
+
+            frame = std::move(frameQueue_.front());
+            frameQueue_.pop();
         }
 
-        // Determine input format from FourCC
-        // NDI uses UYVY (0x59565955) or BGRA (0x41524742)
-        if (frame.fourcc == 0x59565955 || frame.fourcc == 0x56595559) {  // UYVY or YUYV
-            encConfig.inputFormat = PixelFormat::UYVY;
-        } else {
-            encConfig.inputFormat = PixelFormat::BGRA;
+        // Configure encoder on first frame (auto-detect resolution/fps)
+        if (!encoderConfigured_) {
+            VideoEncoderConfig encConfig;
+            encConfig.width = frame.width;
+            encConfig.height = frame.height;
+            encConfig.bitrate = config_.bitrateMbps * 1000000;
+
+            // Determine framerate
+            if (frame.frameRateD > 0 && frame.frameRateN > 0) {
+                encConfig.fps = frame.frameRateN / frame.frameRateD;
+                encConfig.keyframeInterval = encConfig.fps; // Keyframe every second
+            }
+
+            // Determine input format from FourCC
+            // NDI uses UYVY (0x59565955) or BGRA (0x41524742)
+            if (frame.fourcc == 0x59565955 || frame.fourcc == 0x56595559) {  // UYVY or YUYV
+                encConfig.inputFormat = PixelFormat::UYVY;
+            } else {
+                encConfig.inputFormat = PixelFormat::BGRA;
+            }
+
+            Logger::instance().infof("Video: %dx%d @ %d fps, format=0x%08X",
+                                      frame.width, frame.height, encConfig.fps, frame.fourcc);
+            Logger::instance().infof("Encoder: %s preset, %d Mbps",
+                                      encConfig.preset.c_str(), config_.bitrateMbps);
+
+            if (!encoder_->configure(encConfig)) {
+                LOG_ERROR("Failed to configure encoder");
+                continue;
+            }
+            encoderConfigured_ = true;
+            LOG_SUCCESS("Encoder configured");
         }
 
-        Logger::instance().infof("Video: %dx%d @ %d fps, format=0x%08X",
-                                  frame.width, frame.height, encConfig.fps, frame.fourcc);
-        Logger::instance().infof("Encoder: %s preset, %d Mbps",
-                                  encConfig.preset.c_str(), config_.bitrateMbps);
-
-        if (!encoder_->configure(encConfig)) {
-            LOG_ERROR("Failed to configure encoder");
-            return;
-        }
-        encoderConfigured_ = true;
-        LOG_SUCCESS("Encoder configured");
+        // Encode the frame
+        encoder_->encodeWithStride(frame.data.data(), frame.stride,
+                                   static_cast<uint64_t>(frame.timestamp));
     }
 
-    // Encode the frame
-    encoder_->encodeWithStride(frame.data.data(), frame.stride,
-                               static_cast<uint64_t>(frame.timestamp));
+    LOG_DEBUG("Encode thread stopped");
 }
 
 void HostMode::onAudioFrame(const NDIAudioFrame& frame) {
