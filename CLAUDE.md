@@ -305,6 +305,30 @@ Pour trouver l'IP Parallels de la VM :
 prlctl exec "Ubuntu 22.04.2 (x86_64 emulation) (1)" 'ip addr show enp0s5 | grep "inet "'
 ```
 
+## BUG CORRIGÉ : NDIlib_send_create() retourne nullptr sur EC2 (v1.9)
+
+**Symptôme :** `ndi-test-pattern` échoue avec "Failed to create NDI sender" sur EC2 headless.
+`NDIlib_send_create()` retourne nullptr.
+
+**Cause :** name collision. Si un processus `ndi-test-pattern` est tué sans signal propre
+(kill -9, crash, SSH perdu), le NDI SDK ne libère pas le nom de source enregistré.
+Le prochain `NDIlib_send_create()` avec le même nom échoue silencieusement.
+
+**Fix :** tuer TOUS les processus NDI (`pkill -9 ndi`) et attendre 1-2s avant de relancer.
+Le SDK nettoie les noms orphelins au bout de quelques secondes.
+
+**Diagnostic :**
+```bash
+# Vérifier s'il y a des processus NDI orphelins
+pgrep -a ndi
+# Tuer tout
+pkill -9 ndi
+# Attendre et relancer
+sleep 2 && ./build/ndi-test-pattern --name "EC2 Ball" --fps 25
+```
+
+**Ce n'est PAS :** un problème de `clock_video=true` sur headless, ni un bug du SDK Linux.
+
 ## BUG CORRIGÉ : décodage slice-par-slice (v1.8)
 
 L'encodeur x264 avec `slices=10` produit 10 NAL units par frame. Le décodeur
@@ -318,6 +342,8 @@ au lieu de parser et envoyer chaque NAL unit séparément.
 units individuellement au lieu du frame complet.
 
 ## Version
+Actuelle : v1.9 (15 fév 2026)
+
 
 La version est définie dans `src/common/Version.h` (macro `NDI_BRIDGE_VERSION`).
 Ce fichier est inclus par `main.cpp`, `ndi_viewer.cpp` et `ndi_test_pattern.cpp`.
@@ -354,31 +380,50 @@ cmake -B build && cmake --build build
 
 ## Test Pattern (ndi-test-pattern)
 
-Outil de test : bille verte qui rebondit sur fond sombre + tonalité 440 Hz.
-Tout saut/saccade de la bille = dropped frames. Carré blanc clignotant en haut à gauche = frames arrivent.
+**Signal de calibration broadcast UTC-déterministe.** Les 4 canaux sont synchronisés sur UTC :
+1. **Audio LTC** (SMPTE 12M via libltc) — UTC
+2. **Timecode visuel orange** (7-segment overlay) — UTC
+3. **Position de la bille** (triangle wave depuis `utcTotalFrames()`) — UTC
+4. **Métadonnées NDI** (`videoFrame.timecode`) — SDK-synthétisé (process-relatif)
+
+Même UTC = même position de bille sur n'importe quelle machine. Le décalage spatial entre
+deux billes vues en multiviewer = latence du chemin réseau, lisible à l'œil.
 
 ```bash
-./build/ndi-test-pattern --name "VM Ball" --resolution 1920x1080 --fps 30
+./build/ndi-test-pattern --name "EC2 Ball" --resolution 1920x1080 --fps 25 --ball-color red
 ```
 
+Options `--ball-color` : green (défaut), red, blue, yellow, cyan, magenta, white.
+
 - Source : `src/tools/ndi_test_pattern.cpp`
-- Pas de dépendance FFmpeg, juste le NDI SDK
+- Pas de dépendance FFmpeg, juste le NDI SDK + libltc
 - Inclus dans `Version.h` pour le numéro de version
 - Build : cible CMake `ndi-test-pattern`
+- **Validé cross-machine** (15 fév 2026) : bille verte Mac + bille rouge EC2 via bridge,
+  delta TC = 3 frames = ~120ms one-way (cohérent avec SpeedFusion RTT 225ms / 2)
 
-## État actuel (v1.9 — 14 fév 2026)
+## État actuel (v1.9 — 15 fév 2026)
 
 ### Ce qui marche
 - **Build cross-platform** : Mac (build-mac/) et Linux (build/) depuis le même codebase C++
-- **Host Mac → EC2 Frankfurt** : zero-drop, ~29fps, audio OK
-- **Join EC2 décode et publie en NDI** : dropped=0, qdrop=0, decode_ms ~11ms
-- **Host EC2 → Mac** : encode et envoie OK (eagain_drops=0)
+- **Host Mac → EC2 Frankfurt** : zero-drop, 25fps, audio OK
+- **Join EC2 décode et publie en NDI** : dropped=0, qdrop=0, decode_ms ~8.4ms
+- **Host EC2 → Mac via SpeedFusion** : fonctionne ! Le host EC2 envoie vers l'IP LAN Mac (192.168.1.9) via le tunnel SpeedFusion Balance 20 ↔ FusionHub AWS
+- **Round-trip EC2↔Mac** : validé dans les deux sens via SpeedFusion
 - **NDI Viewer v1.9** : 10 pro features (OSD, safe area, grid, tally, source switching)
-- **Test pattern avec LTC** : timecode embarqué, full-range color, H.264
-- **deploy-vm.sh** : mis à jour pour EC2 (libltc-dev, kill test-pattern, clean viewer)
+- **Test pattern UTC-déterministe** : bille + TC + LTC tous synchronisés UTC, `--ball-color` pour distinguer les sources, validé cross-machine (bille verte Mac + rouge EC2, delta = 3 frames = latence bridge)
+- **SpeedFusion VPN** : tunnel Balance 20 ↔ FusionHub AWS opérationnel, EC2 ping Mac LAN en ~200ms
+- **ChronyControl Mac** : remplace `timed`, offset NTP < 1ms (15 fév 2026)
+- **Mesure latence sendTimestamp VALIDÉE** (15 fév 2026) :
+  - Header protocole étendu à 46 bytes, `latency_ms` affiché dans stats join
+  - **Résultats Mac → EC2 Frankfurt** : latence one-way **173-208ms** (moyenne ~190ms)
+  - dropped=2/908 (0.2%), qdrop=0, decode_ms=8.4avg/45max
+  - Test longue durée (93 min) : 142 671 frames, dropped=10 (0.007%), qdrop=637 (0.45%)
+  - Pré-requis : chrony des deux côtés (biais NTP < 2ms)
 
 ### Ce qui bloque
-- **Retour EC2→Mac bloqué par NAT** : le host EC2 envoie vers 80.12.254.168:5991 mais la box ne forward pas UDP entrant. Solutions : port forwarding sur box/Peplink, ou tunnel SpeedFusion.
+- **sudo obligatoire pour join Mac via en7/SpeedFusion** : bug NECP macOS, les processus non-root ne reçoivent pas l'UDP via l'interface secondaire en7 (AX88179A). Contournement : `sudo ./build-mac/ndi-bridge join`. Voir section dédiée ci-dessous.
+- **Performance retour EC2→Mac** : qdrop élevé (193/732), decode_ms=53.7/124.9 — le décodeur Mac n'arrive pas à suivre, probablement lié à la latence SpeedFusion (~200ms) qui cause de l'accumulation
 - **Exclude pattern trop agressif** : le host filtre toute source contenant "Bridge" AVANT de vérifier --source explicite. Quand --source est explicite, le filtre ne devrait pas s'appliquer. Voir findNDISource() lignes 325-330.
 
 ### Infra EC2 Frankfurt (eu-central-1)
@@ -387,50 +432,164 @@ Tout saut/saccade de la bille = dropped frames. Carré blanc clignotant en haut 
 - IP privée : 172.31.44.6
 - Clé SSH : ~/.secrets/aws/ltc-ndi-test-frankfurt.pem
 - User : ubuntu
-- Commande : `ssh -i ~/.secrets/aws/ltc-ndi-test-frankfurt.pem ubuntu@54.93.225.67`
+- Commande : ssh -i ~/.secrets/aws/ltc-ndi-test-frankfurt.pem ubuntu@54.93.225.67
 - NDI Discovery Server : 3.74.169.239
-- SG : sg-0761c1bb83aecc17a (NDI_Security_aws_group)
+- SG : sg-0761c1bb83aecc17a (NDI_Security_aws_group) — UDP 5990-5999 ouvert depuis 0.0.0.0/0
 - Déployé : ndi-bridge-linux compilé, NDI SDK Linux 6, libltc-dev
+- **Instance ltc-ndi-source (i-01a2f7179d76c22c2) TERMINÉE** le 15 fév — ancienne instance spot qui floodait le port 5990 avec des paquets 38 bytes (ancien protocole)
 
-### IP Mac (14 fév 2026)
-- IP publique : 80.12.254.168
-- IP locale : 192.168.8.101
+### SpeedFusion VPN (Balance 20 ↔ FusionHub AWS)
+- Le tunnel SpeedFusion relie le LAN Peplink (192.168.1.x) au VPC AWS (172.31.x.x)
+- EC2 peut atteindre le Mac directement via son IP LAN (192.168.1.9), pas besoin d'IP publique
+- Latence tunnel : ~200ms (Frankfurt ↔ France)
+- **IMPORTANT** : pour le bridge EC2→Mac, toujours utiliser l'IP LAN (192.168.1.x), PAS l'IP publique
+
+### IMPORTANT : sudo obligatoire pour le join Mac via SpeedFusion (en7)
+
+Le Mac est connecté au Peplink Balance 20 via l'adaptateur USB Ethernet AX88179A (**en7**).
+À cause du **bug NECP macOS** (documenté plus haut), les processus non-root ne peuvent pas
+envoyer NI recevoir du trafic unicast UDP via en7 (interface secondaire).
+
+**Conséquence directe :** le `ndi-bridge join` sur Mac doit tourner en `sudo` pour recevoir
+les paquets UDP qui arrivent via SpeedFusion → Balance 20 → en7.
+
+```bash
+# SANS sudo : pkts=0, rien n'arrive (NECP bloque)
+./build-mac/ndi-bridge join --name "EC2 Ball Bridge" --port 5991 -v
+
+# AVEC sudo : les paquets arrivent normalement
+sudo ./build-mac/ndi-bridge join --name "EC2 Ball Bridge" --port 5991 -v
+```
+
+**Diagnostic rapide :**
+```bash
+ping 192.168.1.1          # → "No route to host" (NECP bloque)
+sudo ping 192.168.1.1     # → OK, 0.6ms (root bypass NECP)
+```
+
+**Cela NE concerne PAS :**
+- Le host Mac → EC2 via IP publique (passe par la gateway internet, pas par en7)
+- Le test pattern local (tout est localhost/loopback)
+- Linux/EC2 (pas de NECP)
+
+### IP Mac (15 fév 2026)
+- IP LAN Peplink (en7) : 192.168.1.9 ← **utiliser celle-ci pour le bridge EC2→Mac**
+- IP en0 : peut varier (192.168.1.2 ou autre) — **ne pas utiliser**, en7 est l'interface Peplink
+- Gateway par défaut : doit être 192.168.1.1 (Peplink), pas 172.20.10.1 (iPhone USB)
+- Si gateway = iPhone, le trafic SpeedFusion ne passe pas. Vérifier : `route -n get default`
 - Tailscale : 100.126.165.122
 
 ### Déploiement EC2
-Utiliser `deploy-vm.sh` (mis à jour pour EC2) :
+Utiliser deploy-vm.sh (mis à jour pour EC2) :
 - Installe libltc-dev
 - Tue les anciens processus
 - Copie, build, relance test-pattern + join
 
-### Commandes de test validées (14 fév 2026)
+### Commandes de test validées (15 fév 2026)
+
 ```bash
-# Sur EC2 — lancer le join
+# Sur EC2 — lancer le test pattern
+~/ndi-bridge-linux/build/ndi-test-pattern --name "EC2 Ball" --resolution 1920x1080 --fps 30
+
+# Sur EC2 — lancer le join (reçoit du Mac)
 ~/ndi-bridge-linux/build/ndi-bridge join --name "Test Pattern EC2" --port 5990 -v
 
-# Sur Mac — lancer le host vers EC2
+# Sur Mac — lancer le host vers EC2 (IP publique EC2, OK car EC2 a un port ouvert)
 ./build-mac/ndi-bridge host --source "Test Pattern LTC" --target 54.93.225.67:5990 -v
 
-# Sur Mac — lancer le join retour (port 5991)
-./build-mac/ndi-bridge join --name "EC2 Bridge" --port 5991 -v
+# Sur EC2 — lancer le host retour vers Mac (IP LAN via SpeedFusion !)
+~/ndi-bridge-linux/build/ndi-bridge host --source "EC2 Ball" --target 192.168.1.9:5991 -v
 
-# Sur EC2 — lancer le host retour vers Mac
-~/ndi-bridge-linux/build/ndi-bridge host --source "Test Pattern EC2" --target <IP_MAC>:5991 -v
+# Sur Mac — lancer le join retour (port 5991)
+./build-mac/ndi-bridge join --name "EC2 Ball" --port 5991 -v
 ```
 
-### IMPORTANT pour Claude Code
-- La source NDI s'appelle **"Test Pattern LTC"** (PAS "P20064", PAS "WebCam")
-- Le nom du join sur EC2 ne doit PAS contenir "Bridge" (sinon filtré par excludePatterns)
-- Ne PAS lancer le flux vidéo via Tailscale (100.x.x.x) — perte massive de paquets
+**IMPORTANT pour les targets :**
+- Mac → EC2 : utiliser IP publique EC2 (54.93.225.67) — le security group autorise le port
+- EC2 → Mac : utiliser IP LAN Peplink (192.168.1.9) via SpeedFusion — PAS l'IP publique (NAT bloque)
 
 ### Prochaines étapes
-1. **Résoudre le NAT retour** — port forwarding UDP 5991 sur la box ou utiliser SpeedFusion
+1. **Optimiser performance retour EC2→Mac** — qdrop élevé, investiguer : buffer côté join, tuning décodeur, ou réduire bitrate/résolution
 2. **Fix exclude pattern** — quand --source est explicite, bypasser excludePatterns dans findNDISource()
-3. **Tester round-trip complet** une fois le NAT résolu
-4. **Mesurer latence end-to-end** (LTC timecode permet la mesure précise)
+3. **Calibration NTP optionnelle** — échange ping/pong au démarrage pour soustraire l'offset NTP résiduel du delta sendTimestamp
+4. **Ajouter `h264_videotoolbox`** dans VideoEncoder.cpp (encodage hardware Mac)
+5. **Port Windows** (ajouter `#ifdef _WIN32` dans Network*)
 
 ## Protocole
 
-UDP, header 38 bytes Big-Endian, compatible cross-platform Mac/Linux.
+UDP, header **46 bytes** Big-Endian, compatible cross-platform Mac/Linux.
 Video : H.264 Annex-B. Audio : PCM float32 planar.
-MTU : 1200 bytes (compatible WireGuard/Tailscale si nécessaire).
+MTU : 1400 bytes. MAX_UDP_PAYLOAD = 1354 bytes (1400 - 46).
+
+### Header (46 bytes)
+
+```
+Offset | Field          | Type   | Description
+-------|----------------|--------|---------------------------
+0-3    | magic          | U32    | 0x4E444942 ("NDIB")
+4      | version        | U8     | Protocol version (2)
+5      | mediaType      | U8     | 0=video, 1=audio
+6      | sourceId       | U8     | Source ID (multi-source future)
+7      | flags          | U8     | Bit 0 = keyframe (video)
+8-11   | sequenceNumber | U32    | Frame sequence number
+12-19  | timestamp      | U64    | PTS (10,000,000 ticks/sec)
+20-23  | totalSize      | U32    | Total frame size in bytes
+24-25  | fragmentIndex  | U16    | Current fragment (0-based)
+26-27  | fragmentCount  | U16    | Total fragments
+28-29  | payloadSize    | U16    | Payload size in this packet
+30-33  | sampleRate     | U32    | Audio: sample rate (48000)
+34     | channels       | U8     | Audio: channel count (2)
+35-37  | reserved       | U8[3]  | Reserved
+38-45  | sendTimestamp   | U64    | Wall clock at send time (ns since epoch)
+```
+
+### Mesure de latence (sendTimestamp)
+
+Le `sendTimestamp` est écrit par le host (`Protocol::wallClockNs()` = `clock_gettime(CLOCK_REALTIME)`)
+juste avant chaque `sendto()`. Le join mesure le delta à la réception sur le premier fragment de
+chaque frame et affiche `latency_ms=XXX` dans les stats toutes les 5s.
+
+**Pré-requis :** chrony sur les deux machines. macOS `timed` a ~200-600ms de dérive → inutilisable.
+- **EC2** : chrony natif (offset < 0.01ms)
+- **Mac** : ChronyControl installé (15 fév 2026), remplace `timed`, offset < 1ms
+
+Le delta mesuré = latence réseau + offset NTP résiduel. Avec chrony des deux côtés,
+le biais NTP est < 2ms → le delta est une bonne approximation de la latence one-way.
+
+**Ce que le sendTimestamp NE mesure PAS :**
+- Temps de génération du test pattern
+- Temps d'encodage H.264 (côté host)
+- Temps de décodage H.264 (côté join, visible dans `decode_ms`)
+- Temps de rendu dans le moniteur NDI
+
+### Backward compat
+
+Le deserialize accepte les paquets >= 38 bytes (ancien header) et lit sendTimestamp
+uniquement si >= 46 bytes (sinon 0). `LEGACY_HEADER_SIZE = 38` est défini dans Protocol.h.
+
+## Horloges et timecodes — LIRE AVANT DE TOUCHER
+
+**Skill de référence :** `~/Projets/skills/clockmaster/SKILL.md`
+
+### Règles absolues
+
+1. **Ne JAMAIS décider seul qu'un problème de timecode "n'est pas grave"** — remonter à Pierre
+2. **Framerate LTC = 25fps** (PAL/SECAM, La Réunion) sauf instruction contraire explicite
+3. **CLOCK_REALTIME** = pour timestamps inter-machines (requiert chrony). Pour les durées intra-machine → CLOCK_MONOTONIC
+4. **Le LTC n'est pas "juste un repère visuel"** — c'est le premier maillon de SmoothBond (estimateur Kalman FEC)
+
+### État NTP des machines (15 fév 2026)
+
+| Machine | Daemon | Offset vs UTC | Qualité |
+|---------|--------|---------------|---------|
+| Mac M1  | **chrony** (via ChronyControl) | < 1ms | Excellent |
+| EC2 Frankfurt | chrony natif (Amazon Time Sync) | < 0.01ms | Référence |
+
+**Historique :** avant ChronyControl, le Mac utilisait `timed` (Apple) avec +612ms de dérive.
+
+### Test pattern LTC — source d'horloge
+
+`ndi_test_pattern.cpp` : le timecode visuel ET audio LTC sont synchronisés sur
+`clock_gettime(CLOCK_REALTIME)` relu **à chaque frame** (`syncFromUTC()` ligne 648).
+Le champ NDI `videoFrame.timecode` est `NDIlib_send_timecode_synthesize` (synthétisé par le SDK).
+Le champ `videoFrame.timestamp` (PTS) est propagé de bout en bout via le header du protocole.

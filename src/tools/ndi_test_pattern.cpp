@@ -5,9 +5,10 @@
  * LTC timecode audio (SMPTE 12M via libltc) + professional 7-segment
  * timecode display overlay.
  *
- * The visual timecode and audio LTC are always in perfect sync:
- * timecode is initialized from UTC clock at startup, then incremented
- * frame-by-frame (no per-frame clock reads).
+ * Ball position, visual timecode, and audio LTC are all UTC-deterministic:
+ * same time = same output on any machine.
+ * Timecode is read from the UTC clock every frame (no drift).
+ * Ball position is a pure function of UTC time (triangle wave bounce).
  *
  * Usage:
  *   ndi-test-pattern [--name "Source"] [--resolution WxH] [--fps N]
@@ -107,7 +108,7 @@ struct TimecodeState {
         hh = tm.tm_hour;
         mm = tm.tm_min;
         ss = tm.tm_sec;
-        ff = static_cast<int>((ts.tv_nsec / 1000000.0) * maxFrames / 1000.0);
+        ff = static_cast<int>(ts.tv_nsec * static_cast<int64_t>(maxFrames) / 1000000000LL);
         if (ff >= maxFrames) ff = maxFrames - 1;
     }
 
@@ -150,9 +151,71 @@ struct TimecodeState {
             }
         }
     }
+
+    // Re-read UTC clock every frame (no drift)
+    void syncFromUTC() {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        struct tm tm;
+        gmtime_r(&ts.tv_sec, &tm);
+
+        hh = tm.tm_hour;
+        mm = tm.tm_min;
+        ss = tm.tm_sec;
+        ff = static_cast<int>(ts.tv_nsec * static_cast<int64_t>(maxFrames) / 1000000000LL);
+        if (ff >= maxFrames) ff = maxFrames - 1;
+    }
 };
 
-// ── Ball state ──────────────────────────────────────────────────────
+// ── Ball color ─────────────────────────────────────────────────────
+
+struct BallColor {
+    uint8_t r, g, b;
+    const char* name;
+};
+
+static const BallColor BALL_COLORS[] = {
+    {100, 255,  50, "green"},
+    {255,  60,  60, "red"},
+    { 60, 120, 255, "blue"},
+    {255, 240,  40, "yellow"},
+    {  0, 255, 255, "cyan"},
+    {255,  50, 255, "magenta"},
+    {255, 255, 255, "white"},
+};
+static constexpr int NUM_BALL_COLORS = sizeof(BALL_COLORS) / sizeof(BALL_COLORS[0]);
+
+static const BallColor* findBallColor(const char* name) {
+    for (int i = 0; i < NUM_BALL_COLORS; i++) {
+        if (strcmp(BALL_COLORS[i].name, name) == 0)
+            return &BALL_COLORS[i];
+    }
+    return nullptr;
+}
+
+// ── UTC-deterministic ball ──────────────────────────────────────────
+
+// Triangle wave: bounce between 0 and amplitude, period = 2×amplitude.
+// Pure function — same input = same output on any machine.
+static double triangleWave(double distance, double amplitude) {
+    if (amplitude <= 0.0) return 0.0;
+    double period = 2.0 * amplitude;
+    double phase = fmod(distance, period);
+    if (phase < 0.0) phase += period;
+    return (phase <= amplitude) ? phase : period - phase;
+}
+
+// Frames elapsed since midnight UTC — raw calculation, not affected by drop-frame.
+static uint32_t utcTotalFrames(int fps) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    struct tm tm;
+    gmtime_r(&ts.tv_sec, &tm);
+    int secSinceMidnight = tm.tm_hour * 3600 + tm.tm_min * 60 + tm.tm_sec;
+    int ff = static_cast<int>(ts.tv_nsec * static_cast<int64_t>(fps) / 1000000000LL);
+    if (ff >= fps) ff = fps - 1;
+    return static_cast<uint32_t>(secSinceMidnight * fps + ff);
+}
 
 struct Ball {
     float x, y;
@@ -161,29 +224,29 @@ struct Ball {
 
     void init(int width, int height) {
         radius = height / 20;
-        x = static_cast<float>(width) / 4.0f;
-        y = static_cast<float>(height) / 2.0f;
         vx = 6.0f;
         vy = 3.5f;
+        // Initial position will be set by computeFromUTC()
+        x = static_cast<float>(radius);
+        y = static_cast<float>(radius);
     }
 
-    void update(int width, int height) {
-        x += vx;
-        y += vy;
-
-        if (x - radius <= 0)      { x = static_cast<float>(radius); vx = -vx; }
-        if (x + radius >= width)  { x = static_cast<float>(width - radius); vx = -vx; }
-        if (y - radius <= 0)      { y = static_cast<float>(radius); vy = -vy; }
-        if (y + radius >= height) { y = static_cast<float>(height - radius); vy = -vy; }
+    void computeFromUTC(int width, int height, uint32_t totalFrames) {
+        double bounceW = static_cast<double>(width - 2 * radius);
+        double bounceH = static_cast<double>(height - 2 * radius);
+        x = static_cast<float>(radius + triangleWave(
+            static_cast<double>(totalFrames) * static_cast<double>(vx), bounceW));
+        y = static_cast<float>(radius + triangleWave(
+            static_cast<double>(totalFrames) * static_cast<double>(vy), bounceH));
     }
 };
 
 // ── Video frame generation ──────────────────────────────────────────
 
 static void generateFrame(uint8_t* data, int width, int height, int stride,
-                           Ball& ball, int frameNum,
-                           const TimecodeState& tc, bool showTC,
-                           bool dropFrame, const char* fpsLabel) {
+                           const Ball& ball, uint32_t totalFrames,
+                           const BallColor& color, const TimecodeState& tc,
+                           bool showTC, bool dropFrame, const char* fpsLabel) {
     // Dark gray background
     for (int y = 0; y < height; y++) {
         uint8_t* row = data + y * stride;
@@ -214,16 +277,16 @@ static void generateFrame(uint8_t* data, int width, int height, int stride,
             if (dist2 <= r2) {
                 float edge = static_cast<float>(r2 - dist2) / static_cast<float>(ball.radius * 4);
                 if (edge > 1.0f) edge = 1.0f;
-                row[x * 4 + 0] = static_cast<uint8_t>(50  * edge);  // B
-                row[x * 4 + 1] = static_cast<uint8_t>(255 * edge);  // G
-                row[x * 4 + 2] = static_cast<uint8_t>(100 * edge);  // R
+                row[x * 4 + 0] = static_cast<uint8_t>(color.b * edge);  // B
+                row[x * 4 + 1] = static_cast<uint8_t>(color.g * edge);  // G
+                row[x * 4 + 2] = static_cast<uint8_t>(color.r * edge);  // R
                 row[x * 4 + 3] = static_cast<uint8_t>(255 * edge);  // A
             }
         }
     }
 
-    // Frame counter flash (top-left white square toggles every frame)
-    if (frameNum % 2 == 0) {
+    // Frame counter flash (top-left white square toggles every UTC frame)
+    if (totalFrames % 2 == 0) {
         for (int y = 10; y < 26; y++) {
             uint8_t* row = data + y * stride;
             for (int x = 10; x < 26; x++) {
@@ -239,10 +302,9 @@ static void generateFrame(uint8_t* data, int width, int height, int stride,
     if (showTC) {
         tc::drawTimecodeDisplay(data, stride, width, height,
                                 tc.hh, tc.mm, tc.ss, tc.ff,
-                                dropFrame, frameNum, fpsLabel);
+                                dropFrame, static_cast<int>(totalFrames), fpsLabel);
     }
 
-    ball.update(width, height);
 }
 
 // ── Audio generation ────────────────────────────────────────────────
@@ -298,6 +360,7 @@ static void printUsage(const char* prog) {
            "  --tc-start <HH:MM:SS:FF>  Start timecode (default: UTC time of day)\n"
            "  --no-audio                 Disable all audio\n"
            "  --audio-440                Add 440Hz sine on channel 2 (debug)\n"
+           "  --ball-color <color>       Ball color: green red blue yellow cyan magenta white\n"
            "  --no-tc-display            Disable visual timecode bar (keep audio LTC only)\n"
            "  -h, --help                 Show this help\n"
            "\n"
@@ -312,8 +375,8 @@ static void printUsage(const char* prog) {
            "  59.94      59.94 fps (NTSC high frame rate)\n"
            "  60         60 fps (progressive high frame rate)\n"
            "\n"
-           "Bouncing green ball on dark background.\n"
-           "Any stutter or jump in the ball = dropped frames.\n"
+           "Bouncing green ball — UTC-deterministic (same time = same position).\n"
+           "Ball jump/teleport = dropped frames. Smooth = healthy.\n"
            "Flickering white square (top-left) = frames arriving.\n"
            "LTC timecode (ch1=silence or 440Hz, ch2=LTC per SMPTE convention).\n"
            "\n",
@@ -334,6 +397,7 @@ int main(int argc, char* argv[]) {
     bool audioEnabled = true;
     bool audio440 = false;
     bool showTCDisplay = true;
+    const BallColor* ballColor = &BALL_COLORS[0];  // green
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -354,6 +418,13 @@ int main(int argc, char* argv[]) {
             audioEnabled = false;
         } else if (arg == "--audio-440") {
             audio440 = true;
+        } else if ((arg == "--ball-color") && i + 1 < argc) {
+            ballColor = findBallColor(argv[++i]);
+            if (!ballColor) {
+                fprintf(stderr, "Unknown ball color: %s\n", argv[i]);
+                fprintf(stderr, "Valid: green red blue yellow cyan magenta white\n");
+                return 1;
+            }
         } else if (arg == "--no-tc-display") {
             showTCDisplay = false;
         } else if (arg == "-h" || arg == "--help") {
@@ -585,10 +656,12 @@ int main(int argc, char* argv[]) {
         webSettings.ff.store(tcState.ff);
         webSettings.frameCount.store(frameCount);
 
-        // 1. Generate video frame with current timecode
+        // 1. Compute UTC-deterministic ball position + generate video frame
+        uint32_t totalFrames = utcTotalFrames(videoFps);
+        ball.computeFromUTC(width, height, totalFrames);
         generateFrame(videoData.data(), width, height, stride,
-                      ball, frameCount, tcState, showTCDisplay,
-                      tcRate->dropFrame, tcRate->label);
+                      ball, totalFrames, *ballColor, tcState,
+                      showTCDisplay, tcRate->dropFrame, tcRate->label);
 
         // 2. Send video
         NDIlib_send_send_video_v2(sender, &videoFrame);
@@ -630,10 +703,18 @@ int main(int argc, char* argv[]) {
             NDIlib_send_send_audio_v2(sender, &audioFrame);
         }
 
-        // 4. Increment timecode (frame-by-frame, no clock read)
-        tcState.increment();
+        // 4. Sync timecode from UTC clock (no drift — both Mac and EC2 agree)
+        tcState.syncFromUTC();
 #ifdef HAVE_LIBLTC
-        if (ltcEnc) ltc_encoder_inc_timecode(ltcEnc);
+        if (ltcEnc) {
+            SMPTETimecode stc;
+            memset(&stc, 0, sizeof(stc));
+            stc.hours = tcState.hh;
+            stc.mins  = tcState.mm;
+            stc.secs  = tcState.ss;
+            stc.frame = tcState.ff;
+            ltc_encoder_set_timecode(ltcEnc, &stc);
+        }
 #endif
 
         frameCount++;
