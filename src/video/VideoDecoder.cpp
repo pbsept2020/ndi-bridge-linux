@@ -340,13 +340,22 @@ bool VideoDecoder::decode(const uint8_t* data, size_t size, uint64_t timestamp) 
 
     for (const auto& nal : nalUnits) {
         if (nal.type == NAL_TYPE_SPS) {
-            Logger::instance().debugf("Received SPS (%zu bytes)", nal.size);
-            sps_.assign(nal.data, nal.data + nal.size);
+            // Only log when SPS changes or is first received
+            std::vector<uint8_t> newSps(nal.data, nal.data + nal.size);
+            if (newSps != sps_) {
+                Logger::instance().debugf("Received SPS (%zu bytes)%s",
+                    nal.size, sps_.empty() ? "" : " (changed)");
+                sps_ = std::move(newSps);
+            }
         } else if (nal.type == NAL_TYPE_PPS) {
-            Logger::instance().debugf("Received PPS (%zu bytes)", nal.size);
-            pps_.assign(nal.data, nal.data + nal.size);
-            decoderReady_ = !sps_.empty();
-            if (decoderReady_) {
+            std::vector<uint8_t> newPps(nal.data, nal.data + nal.size);
+            if (newPps != pps_) {
+                Logger::instance().debugf("Received PPS (%zu bytes)%s",
+                    nal.size, pps_.empty() ? "" : " (changed)");
+                pps_ = std::move(newPps);
+            }
+            if (!decoderReady_ && !sps_.empty()) {
+                decoderReady_ = true;
                 LOG_SUCCESS("Decoder ready (SPS/PPS received)");
             }
         } else if (nal.type == NAL_TYPE_IDR) {
@@ -408,20 +417,29 @@ bool VideoDecoder::decode(const uint8_t* data, size_t size, uint64_t timestamp) 
 
 bool VideoDecoder::processNALUnit(const NALUnit& nal, uint64_t timestamp) {
     switch (nal.type) {
-        case NAL_TYPE_SPS:
-            Logger::instance().debugf("Received SPS (%zu bytes)", nal.size);
-            sps_.assign(nal.data, nal.data + nal.size);
-            // SPS/PPS will be sent with the next IDR frame
+        case NAL_TYPE_SPS: {
+            std::vector<uint8_t> newSps(nal.data, nal.data + nal.size);
+            if (newSps != sps_) {
+                Logger::instance().debugf("Received SPS (%zu bytes)%s",
+                    nal.size, sps_.empty() ? "" : " (changed)");
+                sps_ = std::move(newSps);
+            }
             return true;
+        }
 
-        case NAL_TYPE_PPS:
-            Logger::instance().debugf("Received PPS (%zu bytes)", nal.size);
-            pps_.assign(nal.data, nal.data + nal.size);
-            decoderReady_ = !sps_.empty();
-            if (decoderReady_) {
+        case NAL_TYPE_PPS: {
+            std::vector<uint8_t> newPps(nal.data, nal.data + nal.size);
+            if (newPps != pps_) {
+                Logger::instance().debugf("Received PPS (%zu bytes)%s",
+                    nal.size, pps_.empty() ? "" : " (changed)");
+                pps_ = std::move(newPps);
+            }
+            if (!decoderReady_ && !sps_.empty()) {
+                decoderReady_ = true;
                 LOG_SUCCESS("Decoder ready (SPS/PPS received)");
             }
             return true;
+        }
 
         case NAL_TYPE_IDR:
             stats_.keyframesDecoded++;
