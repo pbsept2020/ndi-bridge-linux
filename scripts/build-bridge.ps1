@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 Write-Host "=== NDI Bridge Windows - Full Setup ===" -ForegroundColor Green
 
 # Step 1: Chocolatey
